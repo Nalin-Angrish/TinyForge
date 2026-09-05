@@ -2,7 +2,7 @@
 
 Embeddable inference library for Cortex-M4F — run FlexNN models on STM32 with no heap, no interpreter.
 
-TinyForge is the MCU-side companion to [FlexNN](https://github.com/Nalin-Angrish/FlexNN). **FlexNN** trains and compiles (`FlexNN → model.bin → tinyforge-compile → model_data.h`); **TinyForge** runs the header on-device (`Model::run()`).
+TinyForge is the MCU-side companion to [FlexNN](https://github.com/Nalin-Angrish/FlexNN). **FlexNN** trains and exports (`FlexNN → model.bin`); **TinyForge** compiles and runs (`tinyforge-compile → model_data.h → Model::run()`). FlexNN is standalone — TinyForge depends on FlexNN, not vice versa.
 
 ## Example Usage
 
@@ -26,7 +26,7 @@ int main() {
 ```
 
 **Note:**
-- `generated/model_data.h` is produced by FlexNN, not committed. See `generated/README.md`.
+- `generated/model_data.h` is produced by **TinyForge's** `tinyforge-compile` (in `tools/compiler`, which links FlexNN from `external/` for parsing), not by FlexNN. FlexNN only writes `model.bin`.
 - Dimensions and quant params come from the header; no filesystem on-device.
 
 ## Requirements
@@ -52,8 +52,9 @@ TinyForge/
 ├── src/main.cpp                # example firmware (like FlexNN/src/main.cpp)
 ├── tests/test_runtime.cpp      # host tests
 ├── docs/{OVERVIEW.md,LLD.md}   # spec + low-level design
-├── generated/                  # model_data.h from FlexNN (gitignored)
-└── external/FlexNN/            # submodule
+├── generated/                  # model_data.h from TinyForge/tools/compiler (gitignored)
+├── tools/compiler/             # tinyforge-compile — parses FlexNN model.bin, emits header
+└── external/FlexNN/            # submodule — FlexNN standalone, provides ModelIO format
 ```
 
 ## Building and Running
@@ -86,9 +87,13 @@ cmake --build build-mcu -j
 ### Generate a model
 
 ```bash
+# Train and export with FlexNN (standalone, no TinyForge needed)
 cmake -S external/FlexNN -B external/FlexNN/build && cmake --build external/FlexNN/build -j
 ./external/FlexNN/build/main  # trains and calls exportModel("model.bin")
-external/FlexNN/build/tools/compiler/tinyforge-compile model.bin -o generated --backend cmsis
+
+# Compile with TinyForge (validates, quantizes, emits header for TinyForge runtime)
+cmake -S . -B build && cmake --build build -j
+./build/tools/compiler/tinyforge-compile model.bin -o generated --backend cmsis
 # → generated/model_data.h
 ```
 

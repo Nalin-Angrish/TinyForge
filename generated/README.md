@@ -1,18 +1,19 @@
 # generated/
 
 This directory holds `model_data.h` (and optionally `model_data.cpp`) produced by
-**FlexNN's** `tinyforge-compile` CLI.
+**TinyForge's** `tinyforge-compile` CLI (in `tools/compiler`, which links FlexNN from `external/` for parsing).
 
-It is **gitignored** — not committed. Regenerate from FlexNN:
+It is **gitignored** — not committed. Regenerate:
 
 ```bash
-# From FlexNN repo (or TinyForge/external/FlexNN)
-cmake -S . -B build && cmake --build build
-./build/tools/compiler/tinyforge-compile model.bin --backend cmsis -o /path/to/TinyForge/generated
+# Train and export with FlexNN (standalone)
+cmake -S external/FlexNN -B external/FlexNN/build && cmake --build external/FlexNN/build -j
+./external/FlexNN/build/main  # → model.bin
 
-# Or from TinyForge with vendored FlexNN
-cmake -S external/FlexNN -B external/FlexNN/build && cmake --build external/FlexNN/build
-external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --backend cmsis -o generated
+# Compile with TinyForge (validates, quantizes, emits header)
+cmake -S . -B build && cmake --build build -j
+./build/tools/compiler/tinyforge-compile model.bin --backend cmsis -o generated
+# → generated/model_data.h
 ```
 
 The header contains `static const int8_t weights[]`, `quant params`, and

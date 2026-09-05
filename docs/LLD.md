@@ -1,12 +1,14 @@
-# TinyForge — Low-Level Design (LLD) v0.3
+# TinyForge — Low-Level Design (LLD) v0.4
 
 > **Parent spec:** `docs/OVERVIEW.md` (Draft v0.1, now `ref/` local-only). This LLD is the implementation blueprint for the v0.1 spec. It specifies *exact* data structures, file formats, APIs, build integration, and rationale for every decision. Any deviation in code must update this doc.
 >
 > **Revision 2026-09-05 (v0.2):** **Compiler moved from TinyForge to FlexNN.** All compilation-related work — parsing the flat binary, op-registry validation, arena checks, int8 quantization/calibration, BatchNorm folding, and `model_data.h` codegen — now lives in **`FlexNN/tools/compiler`** (built as part of FlexNN's CMake). TinyForge (this repo) contains only the on-device runtime, platform drivers, and `generated/` header consumed from FlexNN. Section 2, 6, 8, 15, 19 and Appendix D are updated; a migration rationale is added below. v0.1 text that assumed `TinyForge/tools/compiler` is retained as struck-through where useful for history but the new topology is authoritative.
 
-> **Revision 2026-09-05 (v0.3):** **TinyForge is now a CMake library, not a PlatformIO project.** File layout now mirrors FlexNN (`include/tinyforge/`, `lib/`, `src/main.cpp`, `tests/`, `docs/`). `platformio.ini` and PlatformIO `test/`/`lib/` scaffolding removed. Build is `cmake -S . -B build && cmake --build build` (host) or `cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake` (cross). See §2, §19. All compilation-related work — parsing the flat binary, op-registry validation, arena checks, int8 quantization/calibration, BatchNorm folding, and `model_data.h` codegen — now lives in **`FlexNN/tools/compiler`** (built as part of FlexNN's CMake). TinyForge (this repo) contains only the on-device runtime, platform drivers, and `generated/` header consumed from FlexNN. Section 2, 6, 8, 15, 19 and Appendix D are updated; a migration rationale is added below. v0.1 text that assumed `TinyForge/tools/compiler` is retained as struck-through where useful for history but the new topology is authoritative.
+> **Revision 2026-09-05 (v0.3):** **TinyForge is now a CMake library, not a PlatformIO project.** File layout now mirrors FlexNN (`include/tinyforge/`, `lib/`, `src/main.cpp`, `tests/`, `docs/`). `platformio.ini` and PlatformIO `test/`/`lib/` scaffolding removed. Build is `cmake -S . -B build && cmake --build build` (host) or `cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake` (cross). See §2, §19.
 
-**Status:** Draft · **Target:** STM32F407VGT6 (Cortex-M4F, 1 MB Flash, 192 KB RAM: 112 KB SRAM + 64 KB CCM + 16 KB backup), ST-Link V2-A, LIS3DSH/LIS302DL accel, MP45DT02 mic · **Toolchain:** `arm-none-eabi-gcc` via `cmake/toolchains/arm-cortex-m4f.cmake`, CMake 3.10+, CMSIS-NN 6.x, CMSIS-DSP, Eigen3 3.4+, OpenMP (host) · **Repos:** `Nalin-Angrish/FlexNN` (public, PC host, owns compiler) + `Nalin-Angrish/TinyForge` (private, MCU runtime) with submodule `external/FlexNN @ main`
+> **Revision 2026-09-05 (v0.4):** **Dependency clarified: TinyForge depends on FlexNN, not vice versa.** FlexNN remains a standalone training library (no TinyForge knowledge). All compilation — parsing `model.bin`, op-registry validation, arena checks, quantization, codegen — lives in **`TinyForge/tools/compiler`** (as originally in v0.1, reverting v0.2). TinyForge consumes FlexNN's export format; FlexNN never depends on TinyForge. See §2, §4, §6, §8.
+
+**Status:** Draft · **Target:** STM32F407VGT6 (Cortex-M4F, 1 MB Flash, 192 KB RAM: 112 KB SRAM + 64 KB CCM + 16 KB backup), ST-Link V2-A, LIS3DSH/LIS302DL accel, MP45DT02 mic · **Toolchain:** `arm-none-eabi-gcc` via `cmake/toolchains/arm-cortex-m4f.cmake`, CMake 3.10+, CMSIS-NN 6.x, CMSIS-DSP, Eigen3 3.4+, OpenMP (host) · **Repos:** `Nalin-Angrish/FlexNN` (public, standalone training library) + `Nalin-Angrish/TinyForge` (private, CMake library that depends on FlexNN via `external/FlexNN @ main` and owns its compiler)
 
 ---
 
@@ -15,9 +17,9 @@
 1. [Design Principles & Invariants](#1-design-principles--invariants)
 2. [Repository & Build Topology](#2-repository--build-topology)
 3. [FlexNN — Current Implementation Audit](#3-flexnn--current-implementation-audit)
-4. [FlexNN — Refactors & Extensions (PC, now including Compiler)](#4-flexnn--refactors--extensions-pc-now-including-compiler)
+4. [FlexNN — Refactors & Extensions (PC)](#4-flexnn--refactors--extensions-pc)
 5. [Model Export Format (Flat Binary)](#5-model-export-format-flat-binary)
-6. [FlexNN Compiler (PC CLI, lives in FlexNN)](#6-flexnn-compiler-pc-cli-lives-in-flexnn)
+6. [TinyForge Compiler (PC CLI, lives in TinyForge)](#6-tinyforge-compiler-pc-cli-lives-in-tinyforge)
 7. [Quantization Design (int8 per-tensor)](#7-quantization-design-int8-per-tensor)
 8. [Op-Support Registry (Single Source of Truth)](#8-op-support-registry-single-source-of-truth)
 9. [TinyForge Runtime — Constraints & Memory Model](#9-tinyforge-runtime--constraints--memory-model)
@@ -43,13 +45,13 @@
 ## 1. Design Principles & Invariants
 
 1. **FlexNN-only ingestion — by design, not debt.** Generic ONNX/PyTorch import is an open-ended compiler problem (arbitrary graph, control flow, dynamic shapes). FlexNN-only bounds the compiler to a *linear stack* of layers, fully testable in a semester. *Why:* preserves the "every line you can explain" narrative and keeps the validation problem decidable. Rejected alternative: ONNX Runtime conversion — 100+ ops, multi-year effort.
-2. **PC-side compilation lives with FlexNN, runtime lives with TinyForge.** Training (`FlexNN.h`/`Layer.h`), serialization (`ModelIO`), and compilation (parse → validate → quantize → codegen) are all *host* concerns that share the same `LayerType`/`Activation` enums, `Eigen` types, and export format. Co-locating them in `FlexNN` eliminates drift: `FlexNN::exportModel()` can literally `#include "tinyforge/op_registry.hpp"` and refuse to emit an unsupported op before a `model.bin` ever touches a USB stick. TinyForge stays minimal — no binary parser, no Eigen, no `lib/` for the compiler. *Why (v0.2 change):* In v0.1 the compiler was planned as `TinyForge/tools/compiler` with a separate CMake that had to re-define `LayerType`/`Activation` and parse the binary independently. That split forced two copies of the registry and two places to bump `LayerType` when adding `Conv1D`. Moving the compiler into `FlexNN/tools/compiler` makes the registry a single header in one repo, lets `isSupportedForExport()` and `tinyforge-compile` share the same `kRegistry`, and lets FlexNN's CI gate "every exported model is immediately compilable" without needing TinyForge. TinyForge's `external/FlexNN` submodule then provides the *authoritative* registry to the runtime at the pinned SHA. Rejected alternative: keep compiler in TinyForge — would require either duplicating enums or making TinyForge depend on FlexNN's internal headers via a relative `../external` path that breaks standalone FlexNN builds.
-3. **Bottom-up layer unlocking.** A `(layer_type, activation)` is only added to FlexNN + compiler allow-list *after* both runtime backends (scalar + CMSIS-NN) have a tested kernel. Invariant: `FlexNN_exportable ⊆ Runtime_executable`. *Why:* prevents training a model that cannot be deployed; fails at training time, not at flash time. Enforcement now is trivial because `FlexNN/tools/compiler` and `FlexNN/include/Layer.h` live in the same repo and the same PR can add the kernel stub + registry entry + FlexNN enum together.
+2. **TinyForge depends on FlexNN, not vice versa.** FlexNN is a standalone training library — it knows nothing about TinyForge. It trains (`FlexNN.h`/`Layer.h`) and exports a flat binary (`ModelIO`) via `exportModel()`. TinyForge is the consumer: its `tools/compiler` (in this repo) parses FlexNN's `model.bin`, validates against TinyForge's own `op_registry.hpp`, checks arena, quantizes, and emits `model_data.h`. TinyForge vendors FlexNN as `external/FlexNN` to understand the export format, but FlexNN has no dependency on TinyForge and no `tinyforge/` headers. *Why (v0.4 clarification):* v0.2–v0.3 briefly moved the compiler into FlexNN to share `LayerTypes.hpp`, but that made FlexNN depend on TinyForge's supported ops — the wrong direction. The correct layering is FlexNN (training, agnostic) → `model.bin` (contract) → TinyForge compiler (validation for TinyForge runtime). This keeps FlexNN reusable for other runtimes and keeps TinyForge's registry as the single source of truth for what its kernels can do. Rejected: compiler in FlexNN (would couple FlexNN to TinyForge's runtime).
+3. **Bottom-up layer unlocking.** A `(layer_type, activation)` is only added to TinyForge's registry *after* both runtime backends (scalar + CMSIS-NN) have a tested kernel. FlexNN may already support the layer for training, but `TinyForge/tools/compiler` will reject `model.bin` containing an unsupported combo. Invariant: `TinyForge_executable ⊆ FlexNN_exportable` is not required; instead `TinyForge_compiler_accepted ⊆ TinyForge_executable`. *Why:* prevents flashing a model that cannot run; fails at compile time (`tinyforge-compile` in TinyForge), not at training time. Enforcement: add kernel in TinyForge `lib/` + registry entry in `TinyForge/include/tinyforge/op_registry.hpp` + FlexNN layer type if needed, bump TinyForge submodule in FlexNN-free flow.
 4. **Compile-time, not run-time, polymorphism.** Backend (`scalar` vs `cmsis-nn`) and model architecture are baked at compile time (`-DTINYFORGE_BACKEND=...` + generated `model_data.h`). No `malloc`, no `virtual` in hot path, no interpreter loop. *Why:* on 168 MHz M4F, every branch in the inner MAC loop costs cycles; deterministic footprint enables static arena sizing and honest TFLM comparison.
-5. **Fail loudly on the host, never silently on device.** The compiler is a *verifier*: unknown op, OOM arena, mismatched dims → non-zero exit with `layer_index + reason + fix hint`. The runtime never does filesystem I/O or dynamic allocation; it `static_assert`s its arena at build time. *Why:* debugging on SWD UART is expensive; catching errors on the PC saves days. With the compiler in FlexNN, the failure happens even earlier: `FlexNN::exportModel()` can call `validateForTinyForge()` and return `Status::ErrUnsupportedOp` before writing `model.bin`.
-6. **No heap, no exceptions, no RTTI, no STL heap containers in runtime.** Even `std::vector` is banned in `src/`/`include/` runtime code. Host tools (FlexNN library + FlexNN's compiler) may use STL/Eigen freely. *Why:* heap fragmentation is untestable on 192 KB RAM; exceptions/RTTI bloat `.text` and are non-deterministic.
+5. **Fail loudly on the host, never silently on device.** The compiler (`TinyForge/tools/compiler`) is a *verifier*: unknown op, OOM arena, mismatched dims → non-zero exit with `layer_index + reason + fix hint`. The runtime never does filesystem I/O or dynamic allocation; it `static_assert`s its arena at build time. *Why:* debugging on SWD UART is expensive; catching errors on the PC (via `tinyforge-compile`) saves days. FlexNN's `exportModel()` does not validate for TinyForge — it just writes `model.bin`; the verification happens in TinyForge.
+6. **No heap, no exceptions, no RTTI, no STL heap containers in runtime.** Even `std::vector` is banned in `src/`/`include/` runtime code. Host tools (FlexNN library + TinyForge's compiler) may use STL/Eigen freely. *Why:* heap fragmentation is untestable on 192 KB RAM; exceptions/RTTI bloat `.text` and are non-deterministic.
 7. **Two backends, one golden reference.** Scalar C++ is the correctness oracle; CMSIS-NN is the performance variant. They must agree within int8 rounding (`±1 LSB` after requant). *Why:* before benchmarking, we must prove functional equivalence.
-8. **Version everything.** Model binary has `magic + version`, header has `TINYFORGE_MODEL_VERSION`, op registry has its own version. *Why:* allows forward-compatible compiler and clear error when a stale firmware (old submodule SHA) meets a new model (new FlexNN). With the compiler in FlexNN, the registry version is the FlexNN version.
+8. **Version everything.** Model binary has `magic + version`, header has `TINYFORGE_MODEL_VERSION`, op registry has its own version. *Why:* allows forward-compatible compiler and clear error when a stale firmware (old registry) meets a new `model.bin` (new FlexNN). Registry version is TinyForge's version, model version is FlexNN's.
 
 ---
 
@@ -58,44 +60,40 @@
 ### 2.1 Two repos, one submodule
 
 ```
-FlexNN/  (github.com/Nalin-Angrish/FlexNN, public, PC host) — NOW OWNS COMPILER
+FlexNN/  (github.com/Nalin-Angrish/FlexNN, public, standalone) — NO TinyForge dependency
 ├── include/
 │   ├── FlexNN.h, Layer.h, Utility.h          # existing
 │   ├── LayerTypes.hpp                        # NEW: LayerType enum + param structs
-│   ├── ModelIO.hpp                           # NEW: exportModel/importModel
-│   └── tinyforge/                            # NEW: shared with TinyForge runtime
-│       ├── op_registry.hpp                   # SINGLE SOURCE OF TRUTH (see §8)
-│       ├── model.hpp                         # compiler's in-memory Model
-│       ├── quant.hpp                         # quant math
-│       └── codegen.hpp
+│   └── ModelIO.hpp                           # NEW: exportModel/importModel → model.bin
 ├── lib/
 │   ├── FlexNN.cpp, Layer.cpp, Utility.cpp
-│   └── ModelIO.cpp                           # NEW: flat binary writer
-├── tools/
-│   └── compiler/                             # MOVED HERE from TinyForge/tools/compiler
-│       ├── CMakeLists.txt                    # add_executable(tinyforge-compile)
-│       ├── src/{main.cpp, parser.cpp, validate.cpp, quantize.cpp, codegen.cpp}
-│       └── tests/                            # compiler unit tests (GoogleTest)
+│   └── ModelIO.cpp                           # flat binary writer (see §5)
+├── src/main.cpp                              # example training (like before)
 ├── tests/                                    # FlexNN unit tests
-├── CMakeLists.txt                            # add_library(FlexNN ...) + add_subdirectory(tools/compiler)
+├── CMakeLists.txt                            # add_library(FlexNN) — no compiler, no TinyForge
 └── ... (Doxyfile, data, etc.)
 
-TinyForge/  (github.com/Nalin-Angrish/TinyForge, private, CMake library) — THIS REPO
-├── CMakeLists.txt                            # like FlexNN/CMakeLists.txt — add_library(TinyForge)
+TinyForge/  (github.com/Nalin-Angrish/TinyForge, private, CMake library that depends on FlexNN) — THIS REPO
+├── CMakeLists.txt                            # add_library(TinyForge) + add_subdirectory(tools/compiler) for host
 ├── include/tinyforge/                        # public headers (like FlexNN/include/)
 │   ├── tinyforge.h                           # aggregator
 │   ├── types.hpp / runtime.hpp / backend.hpp / quant.hpp
+│   ├── op_registry.hpp                       # SINGLE SOURCE OF TRUTH (see §8) — owned by TinyForge
 │   └── kernels/{dense,conv1d,activations}.hpp
-├── lib/                                      # library sources (like FlexNN/lib/)
+├── lib/                                      # runtime sources (like FlexNN/lib/)
 │   ├── runtime.cpp / backend_scalar.cpp / quant.cpp / activations.cpp
 │   └── backend_cmsis.cpp                     # only with -DTINYFORGE_USE_CMSIS_NN=ON
+├── tools/compiler/                           # tinyforge-compile — lives HERE, depends on FlexNN's ModelIO
+│   ├── CMakeLists.txt                        # add_executable(tinyforge-compile) — links FlexNN via external
+│   ├── src/{main.cpp, parser.cpp, validate.cpp, quantize.cpp, codegen.cpp}
+│   └── tests/                                # compiler tests
 ├── src/main.cpp                              # example firmware (like FlexNN/src/main.cpp)
-├── tests/test_runtime.cpp                    # host tests
-├── docs/{OVERVIEW.md, LLD.md (this)}         # committed spec (ref/ is local ignored copy)
-├── generated/                                # OUTPUT of FlexNN's compiler (gitignored)
-│   └── model_data.h                          # from FlexNN/tools/compiler/tinyforge-compile
-├── cmake/toolchains/arm-cortex-m4f.cmake     # cross toolchain (like -mcpu=cortex-m4)
-└── external/FlexNN/                          # submodule @ main — provides tinyforge-compile + op_registry.hpp
+├── tests/test_runtime.cpp                    # host tests (scalar)
+├── docs/{OVERVIEW.md, LLD.md (this)}         # committed spec
+├── generated/                                # OUTPUT of TinyForge compiler (gitignored)
+│   └── model_data.h                          # from TinyForge/tools/compiler/tinyforge-compile
+├── cmake/toolchains/arm-cortex-m4f.cmake     # cross toolchain
+└── external/FlexNN/                          # submodule @ main — provides ModelIO format for parser
 ```
 
 **Old v0.1 topology (for history):**
@@ -107,49 +105,48 @@ FlexNN/                    ← only libFlexNN, no compiler
 # Problem: two copies of LayerType/Activation, two registries, drift risk.
 ```
 
-**Why the move (detailed):**
+**Why this layering (TinyForge depends on FlexNN, correct direction):**
 
-- **Single definition of `LayerType`/`Activation`:** FlexNN's `Layer.h` defines `enum class Activation` and `enum class LayerType` (see §4.1-4.2). The compiler's parser and validator must switch on those exact enums. If the compiler lived in TinyForge, it would either `#include "../external/FlexNN/include/Layer.h"` (a fragile relative path that breaks when FlexNN is built standalone) or duplicate the enums (drift). In `FlexNN/tools/compiler` the compiler just `#include "LayerTypes.hpp"` and `#include "tinyforge/op_registry.hpp"` with a normal include path.
-- **Export-time validation:** `FlexNN::exportModel()` can now call `tinyforge::isSupported(type, act, quant)` *before* writing `model.bin` and return `Status{false, "layer 2 Conv1D+Tanh not yet in TinyForge runtime"}`. In v0.1 the export would succeed and the later `TinyForge/tools/compiler --check-only` would fail — a worse UX (write then fail).
-- **One CMake, one CI:** `FlexNN/CMakeLists.txt` does `add_library(FlexNN ...)` and `add_subdirectory(tools/compiler)` which does `target_link_libraries(tinyforge-compile PRIVATE FlexNN Eigen3::Eigen)`. FlexNN's own CI can now `ctest` both the training tests and the compiler's parser/quant tests in one build, and `tinyforge-compile --check-only` can be a `add_test()` that runs on every example `model.bin`.
-- **TinyForge stays minimal and is now a plain CMake library (no PlatformIO):** `TinyForge` builds as `add_library(TinyForge)` from `lib/` with headers in `include/tinyforge/` — exactly like `FlexNN` (`add_library(FlexNN)` from `lib/`). The `external/FlexNN` submodule is *not* built as part of TinyForge's library; it is only used to produce `generated/model_data.h` via its `tinyforge-compile` binary. To keep host builds native, TinyForge does not hardcode MCU flags; a toolchain file (`cmake/toolchains/arm-cortex-m4f.cmake`) supplies `-mcpu=cortex-m4 -mfpu=...` for cross builds.
-- **Submodule pinning gives reproducibility:** TinyForge pins a FlexNN SHA. That SHA pins both a `libFlexNN` version and a compiler version and a registry version. When TinyForge bumps the submodule, it automatically bumps the runtime's `op_registry.hpp` (because `runtime/include/tinyforge/runtime.hpp` does `#include "external/FlexNN/include/tinyforge/op_registry.hpp"`). No manual copy.
-- *Rejected:* keep compiler in TinyForge but make it `#include "external/FlexNN/..."` — works for TinyForge builds but breaks `FlexNN` standalone builds (no TinyForge checkout), and FlexNN's own `exportModel` cannot validate without the compiler.
+- **FlexNN stays standalone:** FlexNN has no `tinyforge/` headers, no compiler, no `op_registry`. It just trains and writes `model.bin` via `ModelIO` (see §4.5, §5). Any runtime (TinyForge or future) can consume that `model.bin` without FlexNN needing to know TinyForge's kernels.
+- **TinyForge owns the compiler and registry:** `TinyForge/include/tinyforge/op_registry.hpp` is the single source of truth for what the runtime can execute. `TinyForge/tools/compiler` links against `FlexNN` (via `external/FlexNN`) only to *parse* `model.bin` (reusing `ModelIO` structs) — not to validate at export time. Validation happens in TinyForge's `tools/compiler/src/validate.cpp` after parsing, which can then emit a clear `tinyforge-compile` error (`layer 2 Conv1D+Tanh not supported`) without involving FlexNN.
+- **No export-time coupling:** `FlexNN::exportModel()` does *not* call `tinyforge::find()`; it just writes the requested `(type, act)` and returns success. If the model uses an op TinyForge doesn't support, the error surfaces when the user runs `TinyForge`'s `tinyforge-compile`, not when training in FlexNN. This keeps FlexNN reusable and avoids making FlexNN depend on TinyForge's kernel coverage.
+- **One CMake per repo, one CI per repo:** `FlexNN` builds `libFlexNN` and `src/main.cpp`; `TinyForge` builds `libTinyForge` + `tools/compiler/tinyforge-compile` (which links `FlexNN` from `external` for parsing). Each repo's `ctest` is independent.
+- **TinyForge stays minimal but owns its compiler:** `TinyForge` is still a plain CMake library (`add_library(TinyForge)` like `FlexNN`), but `tools/compiler` lives here, not in FlexNN. The `external/FlexNN` submodule is only needed to build the compiler (for its `ModelIO` format); the runtime (`lib/`, `include/`) never includes FlexNN headers.
+- **Submodule pinning gives reproducibility:** TinyForge pins a FlexNN SHA to know the `model.bin` format it can parse. Bumping the SHA updates the parser, but the registry that gates what can run stays in TinyForge.
 
 ### 2.2 Build systems, clearly separated and now both CMake
 
-- **FlexNN host build (CMake, PC):**
+- **FlexNN host build (CMake, PC, standalone):**
   ```bash
   # Inside FlexNN repo (or TinyForge/external/FlexNN)
   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
   cmake --build build -j
   # produces:
   #   build/libFlexNN.a
-  #   build/tools/compiler/tinyforge-compile
-  #   build/main (example)
+  #   build/main (example training)
   ctest --test-dir build
   ```
-  Flags: `-O3 -march=native -fopenmp -std=c++17` (host). No MCU flags. Tests: `tests/` (FlexNN) + `tools/compiler/tests/`.
+  Flags: `-O3 -march=native -fopenmp -std=c++17` (host). No MCU flags, no compiler. Tests: `tests/` (FlexNN). FlexNN has no knowledge of TinyForge.
 
-- **TinyForge host build (CMake, scalar, like FlexNN):**
+- **TinyForge host build (CMake, scalar, like FlexNN) — also builds its compiler:**
   ```bash
-  # Inside TinyForge repo — no FlexNN needed to build the library itself
+  # Inside TinyForge repo — builds libTinyForge + its compiler (which links FlexNN from external)
   cmake -S . -B build
   cmake --build build -j
   # produces:
   #   build/libTinyForge.a
   #   build/main  # from src/main.cpp
-  ctest --test-dir build  # runs tests/test_runtime.cpp
+  #   build/tools/compiler/tinyforge-compile  # TinyForge's compiler, needs external/FlexNN
+  ctest --test-dir build  # runs tests/test_runtime.cpp + tools/compiler/tests
   ```
 
-- **TinyForge cross build (CMake + toolchain, like FlexNN but for MCU):**
+- **TinyForge cross build (CMake + toolchain, library only for MCU):**
   ```bash
-  # First, ensure FlexNN's compiler is built (it generates the model header):
-  cmake -S external/FlexNN -B external/FlexNN/build && cmake --build external/FlexNN/build -j
-  external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o generated
-  # → writes generated/model_data.h
+  # First, generate the model header with TinyForge's own compiler (built above):
+  ./build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o generated
+  # → writes generated/model_data.h (from FlexNN's model.bin)
 
-  # Then cross-compile TinyForge as a library for STM32F407:
+  # Then cross-compile TinyForge as a library for STM32F407 (no FlexNN needed at runtime):
   cmake -S . -B build-mcu -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake
   cmake --build build-mcu -j
   # or with CMSIS-NN:
@@ -199,13 +196,13 @@ Reading `external/FlexNN/include/Layer.h:37-151`, `lib/Layer.cpp:25-82`, `includ
 
 ---
 
-## 4. FlexNN — Refactors & Extensions (PC, now including Compiler)
+## 4. FlexNN — Refactors & Extensions (PC)
 
-> **Gating rule (from OVERVIEW §5.1):** For each new `(LayerType, Activation)` we implement in FlexNN, the scalar kernel + CMSIS-NN kernel + compiler registry entry must exist *first*. FlexNN's `exportModel()` must refuse to export a model containing an unsupported combo (checked against the same registry header the compiler uses — now trivial because both live in `FlexNN`).
+> **Gating rule (from OVERVIEW §5.1):** For each new `LayerType`/`Activation` FlexNN adds, TinyForge should add a scalar kernel + CMSIS-NN kernel + registry entry in `TinyForge` *before* the model is considered deployable. FlexNN's `exportModel()` does not gate — it just writes `model.bin`; TinyForge's `tools/compiler` gates at compile time.
 
 ### 4.1 Activation Refactor — `enum class Activation`
 
-**File:** `FlexNN/include/Layer.h` (breaking change, major version bump; now also included by `FlexNN/tools/compiler`)
+**File:** `FlexNN/include/Layer.h` (breaking change, major version bump)
 
 ```cpp
 namespace FlexNN {
@@ -227,7 +224,7 @@ inline bool try_parse_activation(std::string_view s, Activation& out);
 - Compile-time exhaustiveness: `switch(a) { case ... }` with `-Wswitch-enum` catches missing cases.
 - No heap, no string compare in hot path (host forward still uses Eigen but now switches on uint8).
 - Export binary encodes `uint8_t activation` (see §5), not variable-length string.
-- **New benefit (v0.2):** `FlexNN/tools/compiler` can `switch` on the same enum without duplicating strings, and `isSupportedForExport()` and the compiler's `validate()` share the same `case` list.
+- **New benefit (v0.2):** `TinyForge/tools/compiler` can `switch` on the same enum without duplicating strings, and `isSupportedForExport()` and the compiler's `validate()` share the same `case` list.
 
 **Migration:**
 
@@ -237,7 +234,7 @@ inline bool try_parse_activation(std::string_view s, Activation& out);
 
 ### 4.2 Layer Type System (Host Only)
 
-**New header:** `FlexNN/include/LayerTypes.hpp` (also included by `FlexNN/tools/compiler` and, via submodule, by TinyForge runtime for the registry)
+**New header:** `FlexNN/include/LayerTypes.hpp` (standalone; TinyForge has its own mirror `TinyForge/include/tinyforge/types.hpp`)
 
 ```cpp
 enum class LayerType : uint8_t {
@@ -325,7 +322,7 @@ For v0.1, `forward()` will support `Dense` + activations (all) and `Conv1D` + `R
 
 **Backward correctness fix:**
 
-- Current `Layer.cpp:72-75` does `dZ = (nextW^T * nextdZ) * (expZ/expZ.sum())` — wrong. New code will, for hidden softmax (if ever allowed), compute `J = diag(s) - s s^T` per column; for final softmax+CE, the `NeuralNetwork::backward()` will fuse: `dZ_last = A_last - Y_onehot` and not call `Layer::backward` for that layer. We will add `assert(activation != Softmax || isLastLayer)` and FlexNN's compiler will reject non-last softmax.
+- Current `Layer.cpp:72-75` does `dZ = (nextW^T * nextdZ) * (expZ/expZ.sum())` — wrong. New code will, for hidden softmax (if ever allowed), compute `J = diag(s) - s s^T` per column; for final softmax+CE, the `NeuralNetwork::backward()` will fuse: `dZ_last = A_last - Y_onehot` and not call `Layer::backward` for that layer. We will add `assert(activation != Softmax || isLastLayer)` and TinyForge's compiler will reject non-last softmax.
 
 ### 4.4 New Layer Types — Spec & Priority
 
@@ -349,13 +346,13 @@ For v0.1, `forward()` will support `Dense` + activations (all) and `Conv1D` + `R
   where `X_padded` is zero-padded. Activation applied per-element.
 - **Backward (FlexNN):** im2col + GEMM style; leverage Eigen: unfold `X` to `col` matrix `[C_in*K × L_out]` then `dW = dZ * col^T`, `dX` via col2im. Keep for host only; no MCU backward.
 - **Why Conv1D before Conv2D:** sensor data is 1D time series; Conv1D maps to `arm_convolve_1d_s8` / `arm_convolve_s8` with `ch_im_in=C_in`, `x/y` dims set to `(L_in,1)`. Simpler than 2D and fits 192 KB RAM.
-- **Edge:** `L_in` up to 256 (accelerometer window 1 sec @ 100 Hz ×3 axes = 300 samples), `C_in` up to 8, `C_out` up to 16, `K=3..7`, `stride=1..2`. FlexNN's compiler validates `L_out` against TinyForge arena (see §9).
+- **Edge:** `L_in` up to 256 (accelerometer window 1 sec @ 100 Hz ×3 axes = 300 samples), `C_in` up to 8, `C_out` up to 16, `K=3..7`, `stride=1..2`. TinyForge's compiler validates `L_out` against TinyForge arena (see §9).
 
 #### 4.4.3 `BatchNorm1D` (training-time; folded at compile time)
 
 - **Host training (FlexNN):** per-feature (per-channel for Conv, per-neuron for Dense) with `gamma, beta, eps`, running `mean/var` (momentum 0.1). Forward: `y = gamma * (x - mean)/sqrt(var+eps) + beta` during training (batch stats) vs `runningMean/Var` at eval. Keep `mean/var` as buffers.
 - **Inference folding (FlexNN compiler):** never shipped as a separate layer. Compiler fuses into preceding `Dense` or `Conv1D` (see §7.5). *Why:* zero runtime cost, avoids needing a BN kernel on MCU. If BN follows a layer without preceding linear (edge), compiler rejects (BN must be foldable).
-- **Export:** we export BN as its own layer type but with flag `foldable=true`; FlexNN's compiler either folds or errors.
+- **Export:** we export BN as its own layer type but with flag `foldable=true`; TinyForge's compiler either folds or errors.
 
 #### 4.4.4 `MaxPool1D` / `AvgPool1D` (new, phase 2)
 
@@ -365,7 +362,7 @@ For v0.1, `forward()` will support `Dense` + activations (all) and `Conv1D` + `R
 
 ### 4.5 Model I/O — `exportModel` / `importModel` (FlexNN)
 
-**New file:** `FlexNN/lib/ModelIO.cpp`, header `FlexNN/include/ModelIO.hpp` (lives with FlexNN, shares `op_registry.hpp`)
+**New file:** `FlexNN/lib/ModelIO.cpp`, header `FlexNN/include/ModelIO.hpp` (standalone, no TinyForge dependency)
 
 ```cpp
 namespace FlexNN {
@@ -380,13 +377,13 @@ Status importModel(NeuralNetwork& net, const std::string& path); // for testing 
 }
 ```
 
-**Behavior (now co-located with compiler):**
+**Behavior:**
 
-1. Validate via `isSupportedForExport()` which directly calls `tinyforge::find(type, act, quant, backend)` from `FlexNN/include/tinyforge/op_registry.hpp` (the same header the compiler uses) before writing; on failure, return error naming the offending layer index + `(type, activation)`. *New in v0.2:* this check is no longer a cross-repo call; it's a direct header include.
+1. Write `model.bin` — no TinyForge validation at export time. FlexNN is agnostic; any `(type, act)` it supports is written. If the model later fails `TinyForge`'s `tinyforge-compile` (e.g., `Conv1D+Tanh` not in TinyForge's registry), the error surfaces in TinyForge, not in FlexNN. This keeps FlexNN reusable.
 2. Open `std::ofstream(path, std::ios::binary)`, write header + layers per §5, `fsync`, close.
-3. `importModel` is only for host tests (read back and `EXPECT_EQ` weights); not used on MCU. FlexNN's compiler's `parser.cpp` reuses the same `ModelIO` structs to read (no duplicated parsing logic).
+3. `importModel` is only for host tests (read back and `EXPECT_EQ` weights); not used on MCU. TinyForge's compiler's `parser.cpp` reuses the same `ModelIO` structs to read (no duplicated parsing logic).
 
-**Why separate `ModelIO.cpp`:** keeps `FlexNN.h`/`Layer.h` focused; serialization is not a `Layer` responsibility. With the compiler in FlexNN, `ModelIO.cpp` and `tools/compiler/src/parser.cpp` can share the `LayerHeader` struct and CRC code.
+**Why separate `ModelIO.cpp`:** keeps `FlexNN.h`/`Layer.h` focused; serialization is not a `Layer` responsibility. `TinyForge/tools/compiler/src/parser.cpp` will reuse the same `LayerHeader` struct (copied from FlexNN's ModelIO) to read `model.bin`.
 
 **Why binary, not JSON:** deterministic, no parser bloat (compiler's parser is 50 LOC and shares code with ModelIO), 2–5× smaller than JSON, no float-to-string rounding issues. *Rejected:* direct C header generation from FlexNN — would couple FlexNN to TinyForge's codegen expectations; flat binary keeps FlexNN minimal (just serialize) and lets the compiler (still in FlexNN) own all validation/quant/codegen.
 
@@ -396,19 +393,15 @@ Status importModel(NeuralNetwork& net, const std::string& path); // for testing 
 
 ### 4.7 Testing FlexNN Changes (including Compiler)
 
-- **Host unit tests** (new, GoogleTest in `FlexNN/tests/` and `FlexNN/tools/compiler/tests/`):
-  - `activation_test`: ReLU/Leaky/Sigmoid/Tanh/Softmax forward+backward vs finite differences (`eps=1e-5`).
-  - `dense_test`: forward/backward vs naive loops.
-  - `conv1d_test`: small cases `C_in=1..2, L=4..8, K=3` brute-forced.
-  - `export_import_test`: train tiny 2-layer net, export, import, `EXPECT_NEAR` weights, then run `FlexNN/build/tools/compiler/tinyforge-compile` on exported file and check header (now a FlexNN `ctest`).
-  - **Compiler tests (now in FlexNN):** `parser_test` (bad magic/CRC/version), `validate_test` (unsupported op → `EXPECT_EXIT 2`), `quant_test` (golden), `codegen_test` (compile `model_data.h` with `arm-none-eabi-gcc`).
-- **Bottom-up gate:** no FlexNN PR merges a new `(type,act)` unless `TinyForge/runtime/tests` scalar vs cmsis test for that kernel passes (see §18). Since the compiler is now in FlexNN, the FlexNN PR that adds `Conv1D+Tanh` must also add the TinyForge kernel test as a submodule bump — the PR description will note the TinyForge runtime test link.
+- **Host unit tests** (GoogleTest in `FlexNN/tests/`):
+  - `activation_test`, `dense_test`, `conv1d_test`, `export_import_test` (train, export, import, `EXPECT_NEAR`).
+- **Bottom-up gate (now TinyForge-centric):** no TinyForge PR merges a new `(type,act)` registry entry unless `TinyForge`'s `lib/` scalar+CMSIS kernels and `tests/` pass; FlexNN can add a layer type first for training, but it is not considered deployable until TinyForge's compiler accepts it.
 
 ---
 
 ## 5. Model Export Format (Flat Binary)
 
-**Decision:** custom flat binary, little-endian, versioned, with CRC. Owned by `FlexNN` (`ModelIO.cpp` writer + `tools/compiler/src/parser.cpp` reader share the same header). TinyForge runtime never parses this binary — it only consumes the generated `model_data.h`. *Why:* see §4.5; also allows `mmap`-free streaming parser in FlexNN's compiler (≈50 LOC) and trivial `hexdump` debugging.
+**Decision:** custom flat binary, little-endian, versioned, with CRC. Owned by `FlexNN` (`ModelIO.cpp` writer) and parsed by `TinyForge` (`tools/compiler/src/parser.cpp` reader) — same `LayerHeader` struct, copied. TinyForge runtime never parses this binary — it only consumes the generated `model_data.h`. *Why:* see §4.5; also allows `mmap`-free streaming parser in TinyForge's compiler (≈50 LOC) and trivial `hexdump` debugging.
 
 **File layout (all ints little-endian):**
 
@@ -425,7 +418,7 @@ Offset  Size  Field
 Per layer:
   0     1     layer_type (uint8) — LayerType enum (FlexNN/include/LayerTypes.hpp)
   1     1     activation (uint8) — Activation enum
-  2     2     dtype = 0x0000 = float32 (uint16) — only float32 for v0.1; int8 only appears after FlexNN compiler quant
+  2     2     dtype = 0x0000 = float32 (uint16) — only float32 for v0.1; int8 only appears after TinyForge compiler quant
   4     4     input_dim (uint32) — for Dense: in_features; for Conv1D: C_in * L_in (flattened) or logical dims (see below)
   8     4     output_dim (uint32) — analogous
  12     4     weight_count (uint32) — number of float32 weights (e.g., Dense: out*in, Conv1D: outCh * inCh * K)
@@ -460,56 +453,56 @@ Per-layer extended (v0.1):
  50    2  conv_dilation
 ```
 
-*Why fixed size:* parser (`FlexNN/tools/compiler/src/parser.cpp`) can `struct __attribute__((packed)) LayerHeader { ... }` and `static_assert(sizeof==52)`, no variable-length parsing. Dense layers just zero those fields. Future pool/BN use same slots with different meaning (documented).
+*Why fixed size:* parser (`TinyForge/tools/compiler/src/parser.cpp`) can `struct __attribute__((packed)) LayerHeader { ... }` and `static_assert(sizeof==52)`, no variable-length parsing. Dense layers just zero those fields. Future pool/BN use same slots with different meaning (documented).
 
 **Versioning policy:**
 
-- Bump `version` on any breaking change (add layer type, change blob layout, change meaning of dims). FlexNN's compiler checks `version == supported_version` and fails with `unsupported version X, expected Y — re-export with newer FlexNN` if mismatch. Minor additive changes that keep old files readable use `header_len` to skip unknown tail bytes.
+- Bump `version` on any breaking change (add layer type, change blob layout, change meaning of dims). TinyForge's compiler checks `version == supported_version` and fails with `unsupported version X, expected Y — re-export with newer FlexNN` if mismatch. Minor additive changes that keep old files readable use `header_len` to skip unknown tail bytes.
 
 **Endian & float:**
 
-- Little-endian (matches x86 host and M4). FlexNN writes via `memcpy` + `htole32` if needed (but on x86 it's no-op). FlexNN's compiler reads with `le32_to_host`. Float32 is IEEE-754 little-endian (same as host).
+- Little-endian (matches x86 host and M4). FlexNN writes via `memcpy` + `htole32` if needed (but on x86 it's no-op). TinyForge's compiler reads with `le32_to_host`. Float32 is IEEE-754 little-endian (same as host).
 
 **Why not FlatBuffers/Protobuf:**
 
-- No schema compiler, no runtime dependency on MCU, no reflection bloat. Our model is a linear stack, not a graph with optionals. FlatBuffers would add 30 KB of parser code to the compiler for no benefit. Rejected. And since the parser now lives in FlexNN, we don't want to pull Protobuf into FlexNN's minimal build.
+- No schema compiler, no runtime dependency on MCU, no reflection bloat. Our model is a linear stack, not a graph with optionals. FlatBuffers would add 30 KB of parser code to the compiler for no benefit. Rejected. And since the parser lives in TinyForge, we keep FlexNN minimal.
 
 ---
 
-## 6. FlexNN Compiler (PC CLI, lives in FlexNN)
+## 6. TinyForge Compiler (PC CLI, lives in TinyForge)
 
-> **v0.2 move:** This entire section was `TinyForge Compiler` in v0.1. It is now `FlexNN Compiler`. All paths `tools/compiler/...` are now `FlexNN/tools/compiler/...`. TinyForge no longer builds the compiler; it *invokes* the FlexNN-built `tinyforge-compile`.
+> **v0.4 move (reverts v0.2):** This section was `FlexNN Compiler` in v0.2–v0.3. It is now `TinyForge Compiler` again. All paths `TinyForge/tools/compiler/...` are now `TinyForge/tools/compiler/...`. TinyForge builds its own `tinyforge-compile` (which links FlexNN from `external/` for parsing); FlexNN no longer owns the compiler and has no TinyForge dependency.
 
 ### 6.1 Responsibilities & Non-Responsibilities
 
-**Does (in FlexNN repo):**
+**Does (in TinyForge repo, `TinyForge/tools/compiler`):**
 
-- Parse flat binary (§5) via shared `ModelIO` structs → in-memory `Model` struct.
-- Validate every `(type, activation, dims)` against **op registry** (§8, also in FlexNN). Fail fast.
+- Parse FlexNN's flat binary (§5) via `external/FlexNN`'s `ModelIO` structs (copied) → in-memory `Model`.
+- Validate every `(type, activation, dims)` against **TinyForge's op registry** (§8, `TinyForge/include/tinyforge/op_registry.hpp`). Fail fast.
 - Validate arena fit (§9.2) against user-supplied `max_arena_bytes` or derived from target (`disco_f407vg: 112 KB SRAM budget`).
-- Optional calibration: read representative dataset (CSV or raw binary) and record per-layer activation ranges (reuses `FlexNN` forward, no duplicate math).
+- Optional calibration: read representative dataset and record per-layer activation ranges (reuses FlexNN's `forward()` via `external/FlexNN` for ground truth, but quant math lives in TinyForge).
 - Quantize (§7) to int8 per-tensor (weights + activations) with optional BN folding.
-- Emit `model_data.h` (+ `model_data.cpp` if needed) as compile-time constants for TinyForge.
+- Emit `model_data.h` (+ `model_data.cpp` if needed) as compile-time constants for TinyForge's runtime.
 
 **Does NOT:**
 
-- Train. Training stays in `FlexNN.h`/`Layer.h`.
-- Do graph optimization beyond BN folding and dead-code elimination of unused layers (none in linear stack).
-- Link or flash. It just emits a header; TinyForge's CMake (via `cmake --build build-mcu` with the toolchain) compiles it into firmware.
-- Live in TinyForge. *Why v0.2:* see §2.1. Keeping it in FlexNN lets `exportModel()` and `tinyforge-compile` share `LayerTypes.hpp` and `op_registry.hpp`, makes `isSupportedForExport()` a one-liner, and lets FlexNN's `ctest` gate export→compile in one CI job.
+- Train. Training stays in FlexNN (`FlexNN.h`/`Layer.h` in `external/FlexNN`).
+- Do graph optimization beyond BN folding and dead-code elimination (none in linear stack).
+- Link or flash. It just emits a header; TinyForge's own CMake + toolchain compiles it into firmware.
+- Live in FlexNN. *Why v0.4:* see §2.1. TinyForge depends on FlexNN, so the compiler that validates for TinyForge's runtime must live in TinyForge and link FlexNN for parsing — not the other way. This keeps FlexNN standalone and reusable.
 
-**Why co-located, not separate (inverted from v0.1):**
+**Why lives in TinyForge, not FlexNN (correct direction):**
 
-- *v0.1 argued* to keep compiler separate from FlexNN for testability without Eigen. *v0.2 corrects* that the compiler *does* need Eigen (for calibration) and *does* need the exact `LayerType` enums — separating them forced duplication. Co-location lets `tools/compiler/src/quantize.cpp` reuse `FlexNN`'s `forward()` for calibration instead of re-implementing layer math, and lets `validate.cpp` call `tinyforge::find()` without a relative `../external` path. The compiler is still testable in isolation (`FlexNN/tools/compiler/tests` links only `libFlexNN`), but it is built and versioned with FlexNN.
+- TinyForge's compiler needs FlexNN's `ModelIO` structs and `forward()` for calibration, so it links `FlexNN` from `external/` (one-way dependency: `TinyForge/tools/compiler` → `external/FlexNN`). If the compiler lived in FlexNN, FlexNN would need TinyForge's `op_registry.hpp` and kernels — the wrong direction (FlexNN would depend on TinyForge). Keeping the compiler in TinyForge makes FlexNN reusable for other runtimes.
 
-### 6.2 CLI (built as `FlexNN/build/tools/compiler/tinyforge-compile`)
+### 6.2 CLI (built as `TinyForge/build/tools/compiler/tinyforge-compile`)
 
 ```
 tinyforge-compile --help
 Usage: tinyforge-compile <model.bin> [options]
 
 Positional:
-  model.bin               Input flat binary from FlexNN::exportModel (FlexNN/lib/ModelIO.cpp)
+  model.bin               Input flat binary from FlexNN::exportModel (FlexNN/lib/ModelIO.cpp via external/FlexNN)
 
 Options:
   -o, --output <dir>      Output dir (default: ./generated) — writes model_data.h for TinyForge
@@ -521,15 +514,15 @@ Options:
   --no-quant              Emit float32 header (no int8) — useful for accuracy baseline
   --fold-bn               Enable BatchNorm folding (default: on)
   --verbose               Human-readable log per layer
-  --version               Print FlexNN + compiler + registry version (all from same repo)
+  --version               Print TinyForge compiler + registry version (FlexNN version from external)
 ```
 
-**Exit codes and `--check-only` use remain as v0.1** (0 success, 2 validation, 3 parse, 4 calib, 5 codegen). *New v0.2:* `FlexNN::exportModel()` will itself call `--check-only` internally and return `Status::ErrUnsupportedOp` before writing, so the CLI's `--check-only` is now also used as a pre-commit check in FlexNN's CI: `tinyforge-compile model.bin --check-only --backend cmsis` ensures the *just-exported* model is deployable to TinyForge's CMSIS backend.
+**Exit codes:** 0 success, 2 validation, 3 parse, 4 calib, 5 codegen. `--check-only` is for CI: `tinyforge-compile model.bin --check-only --backend cmsis` ensures the `model.bin` (from FlexNN) is deployable to TinyForge's CMSIS backend before flashing.
 
-### 6.3 In-Memory Model Representation (FlexNN compiler)
+### 6.3 In-Memory Model Representation (TinyForge compiler)
 
 ```cpp
-// FlexNN/include/tinyforge/model.hpp  (compiler's model, shares LayerType/Activation)
+// TinyForge/include/tinyforge/model.hpp  (compiler's model, mirrors FlexNN's LayerTypes.hpp)
 namespace tinyforge {
 enum class DType { F32=0, I8=1, I32=2 };
 
@@ -556,11 +549,11 @@ struct Model {
 }
 ```
 
-Parser (`FlexNN/tools/compiler/src/parser.cpp`) does `read(fd, &header, sizeof(header))`, validates magic/version/CRC, then loops `layer_count` times reading `LayerHeader` (52 bytes) and then `pread` blobs at declared offsets. Validates `weight_count == expected`. *Shares* `LayerHeader` struct with `FlexNN/lib/ModelIO.cpp` — no duplication.
+Parser (`TinyForge/tools/compiler/src/parser.cpp`) does `read(fd, &header, sizeof(header))`, validates magic/version/CRC, then loops `layer_count` times reading `LayerHeader` (52 bytes) and then `pread` blobs at declared offsets. Validates `weight_count == expected`. Reuses `LayerHeader` struct from FlexNN's `ModelIO` (copied, not included) — keeps FlexNN standalone.
 
-### 6.4 Validation Passes (FlexNN compiler)
+### 6.4 Validation Passes (TinyForge compiler)
 
-**Pass 1 — Registry check** (see §8, header now `FlexNN/include/tinyforge/op_registry.hpp`): for each layer `i`, `lookup(type, act, quant_scheme)` must exist. If not, error:
+**Pass 1 — Registry check** (see §8, `TinyForge/include/tinyforge/op_registry.hpp`): for each layer `i`, `lookup(type, act, quant_scheme)` must exist. If not, error:
 ```
 error: layer 2 (Conv1D, act=Tanh) not in TinyForge registry for backend=cmsis, quant=int8.
   supported: (Conv1D, ReLU), (Conv1D, None)
@@ -569,41 +562,41 @@ error: layer 2 (Conv1D, act=Tanh) not in TinyForge registry for backend=cmsis, q
 
 **Pass 2 — Dimension sanity:** same as v0.1 (`inputDim`, `weight_count`, Conv `L_out`, sequential `outputDim == next inputDim`).
 
-**Pass 3 — Arena fit:** same as v0.1, `max_arena` computed with CMSIS temp, checked against `--arena`. *Why in FlexNN's compiler, not TinyForge runtime:* gives immediate feedback during FlexNN training iteration, without needing to copy `model.bin` to TinyForge and run `pio`.
+**Pass 3 — Arena fit:** same as v0.1, `max_arena` computed with CMSIS temp, checked against `--arena`. *Why in TinyForge's compiler, not runtime:* gives immediate feedback on the host before flashing; the runtime then just `static_assert`s.
 
-### 6.5 Calibration (Activation Ranges, in FlexNN)
+### 6.5 Calibration (Activation Ranges, in TinyForge)
 
 When `--calib` is supplied and quant is enabled:
 
-1. Load CSV via `FlexNN::readCSV_XY` (now *in the same repo*, no wrapper) and reuse `FlexNN::NeuralNetwork::forward()` for calibration — no re-implementation.
+1. Load CSV via `FlexNN::readCSV_XY` (from `external/FlexNN`) and reuse `FlexNN::NeuralNetwork::forward()` (linked from external) for calibration — no re-implementation of layer math.
 2. For `N = min(calib_samples, dataset_rows)`, run `model.forward(sample)` in float, record per-layer `min/max` of post-activation output (`A`).
 3. Compute per-layer `scale = (max - min) / 255`, `zero_point = clamp(round(-min/scale), -128,127)`.
 4. If `--no-quant`, skip; if no calib data but quant requested, use weight range + heuristic `[-6,6]` for Tanh/Sigmoid.
 
 *Why per-tensor for v0.1:* same as v0.1, one scale/zp per tensor, simplest CMSIS path.
 
-### 6.6 Code Generation (FlexNN compiler emits for TinyForge)
+### 6.6 Code Generation (TinyForge compiler emits for its runtime)
 
-**Output files (default `generated/` or `FlexNN/generated/` then copied to `TinyForge/generated/`):**
+**Output files (default `TinyForge/generated/`):**
 
-- `model_data.h` — single header, include-guard `TINYFORGE_MODEL_DATA_H`, contains `TINYFORGE_MODEL_VERSION`, `TINYFORGE_LAYER_COUNT`, `TINYFORGE_ARENA_BYTES`, `tinyforge_scale_l0`, `tinyforge_weights_l0[8192]`, `tinyforge_layers[]`, etc. (see Appendix C). TinyForge's runtime `#include "generated/model_data.h"` has no idea it was produced by FlexNN — it just sees constants.
-- Reproducibility comment: `// Generated by FlexNN tinyforge-compile v0.2.0 (FlexNN SHA ...) from model.bin (sha256: ...) on 2026-09-05`.
+- `model_data.h` — single header, include-guard `TINYFORGE_MODEL_DATA_H`, contains `TINYFORGE_MODEL_VERSION`, `TINYFORGE_LAYER_COUNT`, `TINYFORGE_ARENA_BYTES`, `tinyforge_scale_l0`, `tinyforge_weights_l0[8192]`, `tinyforge_layers[]`, etc. (see Appendix C). Runtime `#include "generated/model_data.h"` just sees constants.
+- Reproducibility comment: `// Generated by TinyForge tinyforge-compile v0.4.0 (TinyForge SHA + FlexNN SHA ...) from model.bin (sha256: ...) on 2026-09-05`.
 
 **Quantized encoding and header-vs-blob rationale unchanged from v0.1** (affine, `model_data.h` in flash, no SD).
 
-### 6.7 Compiler Testing (now in FlexNN)
+### 6.7 Compiler Testing (in TinyForge)
 
-- **Parser tests:** corrupt magic, version mismatch, CRC fail → exit 3 (in `FlexNN/tools/compiler/tests/parser_test`).
+- **Parser tests:** corrupt magic, version mismatch, CRC fail → exit 3 (in `TinyForge/tools/compiler/tests/parser_test`).
 - **Validation tests:** each unsupported `(type,act)` → exit 2.
 - **Quant tests:** golden.
 - **Golden header test:** compile generated header with `arm-none-eabi-gcc -c`.
-- **CI (FlexNN):** `ctest --test-dir build` runs *both* `FlexNN/tests` and `tools/compiler/tests` in one job; a `add_test(NAME tinyforge_compile_check COMMAND tinyforge-compile ... --check-only)` gates every example model.
+- **CI (TinyForge):** `ctest --test-dir build` runs `tests/` (runtime) and `tools/compiler/tests/` (parser/validate/quant/codegen); a `add_test` for `tinyforge-compile model.bin --check-only` gates every example `model.bin`.
 
 ---
 
 ## 7. Quantization Design (int8 per-tensor)
 
-*This section lives logically in FlexNN's compiler (`FlexNN/tools/compiler/src/quantize.cpp`) but is documented here because TinyForge's kernels must agree.*
+*This section lives in TinyForge's compiler (`TinyForge/tools/compiler/src/quantize.cpp`) and its runtime must agree.*
 
 ### 7.1 Math
 
@@ -623,7 +616,7 @@ For matmul with bias:
 
 **Requantization:**
 
-CMSIS-NN expects `arm_nn_requantize(acc, multiplier, shift)` where `multiplier` is Q31 and `shift` is 31 - `right_shift`. FlexNN's compiler computes:
+CMSIS-NN expects `arm_nn_requantize(acc, multiplier, shift)` where `multiplier` is Q31 and `shift` is 31 - `right_shift`. TinyForge's compiler computes:
 ```
 effective_scale = (scale_in * scale_w) / scale_out
 multiplier = quantize_multiplier(effective_scale) // frexp to Q31
@@ -653,16 +646,16 @@ W_fold = W * gamma / sqrt(var + eps)
 b_fold = (b - mean) * gamma / sqrt(var+eps) + beta
 ```
 
-FlexNN's compiler does this in float before quantization, then deletes the BN layer from the architecture descriptor. *Why in FlexNN's compiler, not TinyForge runtime:* zero runtime cost, no BN kernel needed, and FlexNN already has `gamma/beta/mean/var`.
+TinyForge's compiler does this in float before quantization, then deletes the BN layer from the architecture descriptor. *Why in compiler, not runtime:* zero runtime cost, no BN kernel needed; `gamma/beta/mean/var` come from FlexNN's `model.bin` BN aux.
 
 ---
 
 ## 8. Op-Support Registry (Single Source of Truth)
 
-**File: `FlexNN/include/tinyforge/op_registry.hpp`** (authoritative; TinyForge runtime includes it via submodule)
+**File: `TinyForge/include/tinyforge/op_registry.hpp`** (authoritative; FlexNN has no copy)
 
 ```cpp
-// FlexNN/include/tinyforge/op_registry.hpp — single header for both FlexNN and TinyForge
+// TinyForge/include/tinyforge/op_registry.hpp — single header for TinyForge runtime + compiler
 #pragma once
 #include "LayerTypes.hpp" // LayerType, Activation
 
@@ -698,11 +691,11 @@ inline const OpEntry* find(LayerType t, Activation a, QuantScheme q, Backend b) 
 } // namespace tinyforge
 ```
 
-**TinyForge runtime usage (via submodule):**
+**TinyForge runtime usage:**
 
 ```cpp
-// TinyForge/runtime/include/tinyforge/runtime.hpp
-#include "external/FlexNN/include/tinyforge/op_registry.hpp" // <-- same header, pinned SHA
+// TinyForge/include/tinyforge/runtime.hpp
+#include "tinyforge/op_registry.hpp" // <-- same header as compiler
 
 Status Model::init() {
   for (auto &l : tinyforge_layers) {
@@ -712,15 +705,15 @@ Status Model::init() {
 }
 ```
 
-**Why single header in FlexNN (v0.2):**
+**Why single header in TinyForge (correct direction):**
 
-- Both FlexNN's `exportModel()` validation and `tools/compiler` and TinyForge's `runtime.cpp` include the *same* file. Add a new op → add one line in `FlexNN/include/tinyforge/op_registry.hpp`, implement kernel in TinyForge `runtime/src/backend_*.cpp`, add tests in both repos, bump submodule SHA in TinyForge. CI fails if kernel symbol not found (`static_assert` on `kRegistry` size).
-- Versioned: `version_added` lets FlexNN's compiler emit `requires registry v2` error if a model was exported with a newer FlexNN but TinyForge pins an older SHA (runtime `init()` will also fail).
+- Both TinyForge's `tools/compiler` and `lib/runtime.cpp` include the *same* `TinyForge/include/tinyforge/op_registry.hpp`. Add a new op → add one line in that header, implement kernel in `lib/backend_*.cpp`, add compiler + runtime tests, update FlexNN `LayerTypes.hpp` if needed for training. No FlexNN change needed for registry.
+- Versioned: `version_added` lets TinyForge's compiler emit `requires registry v2` if `model.bin` was exported with a newer FlexNN that TinyForge's pinned parser doesn't understand.
 - *v0.1 had* `TinyForge/tools/compiler/include/tinyforge/op_registry.hpp` duplicated from FlexNN — now deleted. The authoritative path is FlexNN's.
 
 **Generation vs manual:**
 
-- Manual for v0.1 (6–8 entries). Future: generate from TinyForge kernel implementations via `extract_registry.py` that greps `TINYFORGE_REGISTER_OP(...)` macros and updates `FlexNN/include/tinyforge/op_registry.hpp` via PR.
+- Manual for v0.1 (6–8 entries). Future: generate from TinyForge kernel implementations via `extract_registry.py` that greps `TINYFORGE_REGISTER_OP(...)` macros and updates `TinyForge/include/tinyforge/op_registry.hpp` via PR.
 
 ---
 
@@ -754,7 +747,7 @@ After layer i: swap pointers (no memcpy)
 
 **Sizing:**
 
-- FlexNN's compiler computes `max_arena = max_i (sizeof(q) * max(in_dim_i, out_dim_i) + cmsis_temp)` where `cmsis_temp` for `arm_convolve_s8` may need `2 * C_in * K` extra (documented in CMSIS-NN). For Dense, temp = 0. TinyForge's runtime `static_assert`s the header's `TINYFORGE_ARENA_BYTES`.
+- TinyForge's compiler computes `max_arena = max_i (sizeof(q) * max(in_dim_i, out_dim_i) + cmsis_temp)` where `cmsis_temp` for `arm_convolve_s8` may need `2 * C_in * K` extra (documented in CMSIS-NN). For Dense, temp = 0. TinyForge's runtime `static_assert`s the header's `TINYFORGE_ARENA_BYTES`.
 - Example: model `Dense 128→64→10` int8, worst `128` bytes → arena = 128 B (!) + overhead → fits in 1 KB. Conv `C_in=3, L=100, C_out=8, K=5, stride=2` → `in=300, out=8*50=400` → arena ~400 B.
 - Runtime `static_assert(TINYFORGE_ARENA_BYTES >= TINYFORGE_REQUIRED_ARENA, "increase arena")` at compile time.
 
@@ -882,7 +875,7 @@ Triple loop `oc → ol → k,ic` as in §4.4.2, with `int32_t acc`. No im2col ne
 
 **CMSIS temp buffer:**
 
-`arm_convolve_s8` needs `ctx.buf` sized `2 * C_in * K` int16 + alignment. FlexNN's compiler arena calc must include this; TinyForge's runtime `ctx.buf = arena_temp`.
+`arm_convolve_s8` needs `ctx.buf` sized `2 * C_in * K` int16 + alignment. TinyForge's compiler arena calc must include this; TinyForge's runtime `ctx.buf = arena_temp`.
 
 ### 11.3 Pool1D (Future)
 
@@ -926,7 +919,7 @@ C) **Piecewise linear (PWL):** CMSIS-NN uses `arm_nn_activations_direct`? Actual
 **LLD decision for v0.2:**
 
 - **Float runtime:** use `sigmoid = 1/(1+expf(-x))`, `tanh = tanhf(x)` (allow `-ffast-math`).
-- **Int8 scalar:** use **LUT 256** for both. Generated LUT at compile time in `model_data.h` as `static const int8_t sigmoid_lut[256]` (emitted by FlexNN's compiler).
+- **Int8 scalar:** use **LUT 256** for both. Generated LUT at compile time in `model_data.h` as `static const int8_t sigmoid_lut[256]` (emitted by TinyForge's compiler).
 - **Int8 CMSIS:** use `arm_nnfunctions.h` `arm_sigmoid_s8` if available in CMSIS-NN 6.x; else fallback to LUT.
 
 *Why LUT for int8:* int8 domain is already quantized; LUT is O(1) and branch-free. Accuracy loss <1% vs expf, acceptable for edge.
@@ -937,12 +930,12 @@ C) **Piecewise linear (PWL):** CMSIS-NN uses `arm_nn_activations_direct`? Actual
 
 ## 13. Runtime Public API & Error Model
 
-**Header:** `TinyForge/runtime/include/tinyforge/runtime.hpp` (includes `generated/model_data.h` which was produced by FlexNN's compiler)
+**Header:** `TinyForge/runtime/include/tinyforge/runtime.hpp` (includes `generated/model_data.h` which was produced by TinyForge's compiler)
 
 ```cpp
 #pragma once
 #include <stdint.h>
-#include "generated/model_data.h" // from FlexNN's compiler
+#include "generated/model_data.h" // from TinyForge's compiler
 
 namespace tinyforge {
 
@@ -950,7 +943,7 @@ enum class Status : int32_t {
   Ok = 0,
   ErrBadDims = -1,
   ErrArenaTooSmall = -2,
-  ErrUnsupportedOp = -3, // registry miss — should have been caught by FlexNN's compiler, but re-checked
+  ErrUnsupportedOp = -3, // registry miss — should have been caught by TinyForge's compiler, but re-checked
   ErrNullPtr = -4
 };
 
@@ -977,7 +970,7 @@ private:
 
 **Error handling:**
 
-- `init()` checks `TINYFORGE_LAYER_COUNT <= kMaxLayers (16)` and each `type/act` in registry (via FlexNN's header); on fail returns `ErrUnsupportedOp` and also `printf` via UART if `TINYFORGE_DEBUG`. This is a second line of defense — FlexNN's compiler should have already rejected, but runtime re-checks in case a stale `model_data.h` from an older FlexNN SHA is flashed with newer TinyForge.
+- `init()` checks `TINYFORGE_LAYER_COUNT <= kMaxLayers (16)` and each `type/act` in registry (via FlexNN's header); on fail returns `ErrUnsupportedOp` and also `printf` via UART if `TINYFORGE_DEBUG`. This is a second line of defense — TinyForge's compiler should have already rejected, but runtime re-checks in case a stale `model_data.h` from an older FlexNN SHA is flashed with newer TinyForge.
 - `run()` checks null, then loops layers calling `run_layer`. No `assert`, no `exit`; caller can `if (status != Ok) blink_error_led(status)`.
 - No C++ exceptions: compile with `-fno-exceptions`.
 
@@ -1030,10 +1023,10 @@ cd FlexNN  # or cd external/FlexNN inside TinyForge
 cmake -S . -B build && cmake --build build -j
 ./build/main  # trains, calls FlexNN::exportModel("model.bin") — now validates via registry before writing
 
-# 2) Compile/validate/quantize — NOW WITH FlexNN's compiler
-./build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o /path/to/TinyForge/generated
+# 2) Compile/validate/quantize — with TinyForge's compiler (links FlexNN for parsing)
+./build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o generated
 # or if inside TinyForge:
-#   external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o generated
+#   build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o generated
 # emits generated/model_data.h (for TinyForge)
 
 # --- In TinyForge repo (this repo, MCU) ---
@@ -1055,7 +1048,7 @@ cmake --build build-mcu -j
 # FlexNN's own ctest runs this on every example model.bin
 ```
 
-**Why `TinyForge/generated/` is gitignored (`build/` pattern):** generated header is artifact, not source; FlexNN's compiler regenerates it. CI regenerates it from the pinned FlexNN SHA. You may commit an example `TinyForge/generated/example_model_data.h` for tests with `// GENERATED by FlexNN v...` comment, but the live `model_data.h` is ignored.
+**Why `TinyForge/generated/` is gitignored (`build/` pattern):** generated header is artifact, not source; TinyForge's compiler regenerates it. CI regenerates it from the pinned FlexNN SHA. You may commit an example `TinyForge/generated/example_model_data.h` for tests with `// GENERATED by FlexNN v...` comment, but the live `model_data.h` is ignored.
 
 ---
 
@@ -1071,7 +1064,7 @@ cmake --build build-mcu -j
 ### 16.2 7.2 Gesture/Activity (Multi-class, Accelerometer)
 
 - Same input windowing, larger output `Dense 32→6 Softmax` (walk/idle/shake/...). Softmax on host only, MCU does argmax on logits (TinyForge runtime skips softmax).
-- Needs more data collection (UART dump to PC, label, train in FlexNN — then FlexNN's compiler emits header).
+- Needs more data collection (UART dump to PC, label, train in FlexNN — then TinyForge's compiler emits header).
 
 ### 16.3 7.3 Keyword Spotting (Mic + MFCC)
 
@@ -1107,9 +1100,9 @@ Per §8 of spec, three firmware variants **per application**, separately flashed
 
 ### Host (PC) — GoogleTest
 
-- **`FlexNN` tests (in `FlexNN/tests/` and `FlexNN/tools/compiler/tests/`):**
+- **`FlexNN` tests (in `FlexNN/tests/` and `TinyForge/tools/compiler/tests/`):**
   - `activation_test`, `dense_test`, `conv1d_test` (FlexNN)
-  - `export_import_test` (FlexNN, then runs `FlexNN/build/tools/compiler/tinyforge-compile` on exported file)
+  - `export_import_test` (FlexNN, then runs `TinyForge/build/tools/compiler/tinyforge-compile` on exported file)
   - `parser_test` (FlexNN compiler, bad magic/CRC/version → exit 3)
   - `validate_test` (FlexNN compiler, unsupported `(type,act)` → exit 2)
   - `quant_test` (FlexNN compiler, golden), `codegen_test` (compile `model_data.h` with `arm-none-eabi-gcc`)
@@ -1129,7 +1122,7 @@ Per §8 of spec, three firmware variants **per application**, separately flashed
 ### CI (GitHub Actions, planned)
 
 - **`FlexNN` CI:** `cmake -S . -B build && ctest` — builds `libFlexNN` + `tinyforge-compile` and runs all host tests including `--check-only` on example models. This is where export→compile is gated.
-- **`TinyForge` CI:** `cmake -S . -B build && cmake --build build` (host scalar) and `cmake -S . -B build-mcu -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake && cmake --build build-mcu` (cross, no hardware) — verifies that the pinned `external/FlexNN` SHA's `op_registry.hpp` + `generated/model_data.h` (regenerated via FlexNN's compiler) still compiles for MCU. Also `registry-gate`: run `external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --check-only`.
+- **`TinyForge` CI:** `cmake -S . -B build && cmake --build build` (host scalar) and `cmake -S . -B build-mcu -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake && cmake --build build-mcu` (cross, no hardware) — verifies that the pinned `external/FlexNN` SHA's `op_registry.hpp` + `generated/model_data.h` (regenerated via TinyForge's compiler) still compiles for MCU. Also `registry-gate`: run `external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --check-only`.
 
 ---
 
@@ -1165,7 +1158,7 @@ TinyForge/  (private, runtime only)
 │   ├── include/tinyforge/{runtime.hpp, backend.hpp, kernels/{dense.hpp, conv.hpp, activations.hpp}, quant.hpp}
 │   ├── src/{runtime.cpp, backend_scalar.cpp, backend_cmsis.cpp}
 │   └── platform/{clock.cpp, uart.cpp, accel_driver.cpp, mic_driver.cpp, dsp_mfcc.cpp}
-├── generated/                       # .gitignore, OUTPUT of FlexNN's compiler
+├── generated/                       # .gitignore, OUTPUT of TinyForge's compiler
 │   └── model_data.h                 # generated by external/FlexNN/build/tools/compiler/tinyforge-compile
 ├── docs/{OVERVIEW.md,LLD.md}          # committed spec (ref/ is local ignored copy)
 ├── cmake/toolchains/arm-cortex-m4f.cmake  # cross toolchain (replaces platformio.ini)
@@ -1173,7 +1166,7 @@ TinyForge/  (private, runtime only)
 └── ref/{OVERVIEW.md, LLD.md}        # local-only, gitignored
 ```
 
-Generated `model_data.h` example: see Appendix C (emitted by `FlexNN/tools/compiler`, consumed by `TinyForge/runtime`).
+Generated `model_data.h` example: see Appendix C (emitted by `TinyForge/tools/compiler`, consumed by `TinyForge/runtime`).
 
 ---
 
@@ -1197,7 +1190,7 @@ Generated `model_data.h` example: see Appendix C (emitted by `FlexNN/tools/compi
 
 **Phase 6 — TFLM baseline & paper:** build `tflm_cmsis` variants, measure per §17.
 
-*No FlexNN layer is “unlocked” for export until its TinyForge kernels + registry entry exist — enforced by `FlexNN::isSupportedForExport()` which directly checks the shared `FlexNN/include/tinyforge/op_registry.hpp`.*
+*No FlexNN layer is “unlocked” for export until its TinyForge kernels + registry entry exist — enforced by `FlexNN::isSupportedForExport()` which directly checks the shared `TinyForge/include/tinyforge/op_registry.hpp`.*
 
 ---
 
@@ -1206,10 +1199,10 @@ Generated `model_data.h` example: see Appendix C (emitted by `FlexNN/tools/compi
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
 | Softmax backward incorrect blocks training of new activations | Medium | High | Fix hidden softmax Jacobian, or restrict Softmax to last layer + fuse with CE; add finite-diff tests in FlexNN |
-| Arena exceeds CCM 64 KB | Low (models small) | Medium | FlexNN's compiler checks arena vs `--arena`; fallback to SRAM1 via `__attribute__((section(".ram")))`; reduce model dims |
+| Arena exceeds CCM 64 KB | Low (models small) | Medium | TinyForge's compiler checks arena vs `--arena`; fallback to SRAM1 via `__attribute__((section(".ram")))`; reduce model dims |
 | CMSIS-NN API mismatch (version 5 vs 6) | Medium | Medium | Pin `CMSIS-NN@1.3.0` via `lib_deps` in TinyForge; wrapper that `#if` checks `ARM_CMSIS_NN_VERSION` |
 | LUT accuracy for Sigmoid/Tanh degrades to >2% drop | Medium | Medium | Fallback to `expf` float path, report tradeoff; increase LUT to 512 with interpolation (FlexNN compiler emits larger LUT) |
-| FlexNN CSV reading slow for large calibration set | Low | Low | `--calib-samples 500` default; stream, don't load all (FlexNN's compiler reuses `Utility::readCSV_XY`) |
+| FlexNN CSV reading slow for large calibration set | Low | Low | `--calib-samples 500` default; stream, don't load all (TinyForge's compiler reuses `Utility::readCSV_XY`) |
 | DMA buffers in CCM hard-fault | High if ignored | High | `static_assert` DMA buffers in `0x20000000` SRAM1 via linker check script in TinyForge |
 | TFLM comparison unfair (forgot to enable CMSIS) | High | High | `tflm_cmsis` variant explicitly sets `CMSIS_NN=1`; CI builds both and checks `arm_fully_connected_s8` symbol present via `nm` |
 | **New v0.2:** FlexNN and TinyForge drift (registry out of sync) | Medium | High | **Registry lives only in FlexNN**; TinyForge includes it via `external/FlexNN/include/tinyforge/op_registry.hpp` at the pinned SHA. TinyForge's `init()` re-checks registry. Bump submodule SHA on every registry change. CI in both repos checks `git submodule status` is clean. |
@@ -1226,7 +1219,7 @@ See §5. Magic `0x54464E47`, version `1`, little-endian, CRC32 IEEE, per-layer 5
 000010: # layer 0: Dense 128->64 ReLU, 8192 weights @0x100, 64 biases @0x8100 ...
 ```
 
-Parser pseudocode in `FlexNN/tools/compiler/src/parser.cpp:17`:
+Parser pseudocode in `TinyForge/tools/compiler/src/parser.cpp:17`:
 
 ```cpp
 LayerHeader h; in.read((char*)&h, sizeof(h));
@@ -1241,7 +1234,7 @@ assert(h.weight_count == expected_for[h.layer_type]);
 
 ## Appendix B: Op Registry Example
 
-`FlexNN/include/tinyforge/op_registry.hpp:10` (authoritative, included by TinyForge via submodule)
+`TinyForge/include/tinyforge/op_registry.hpp:10` (authoritative, included by TinyForge via submodule)
 
 ```cpp
 static constexpr OpEntry kRegistry[] = {
@@ -1267,7 +1260,7 @@ for (i in 0..layer_count-1) {
 
 ## Appendix C: Generated Header Example
 
-`TinyForge/generated/model_data.h` (tiny model `Dense 4→3 ReLU → Dense 3→2 Softmax`, int8, **emitted by `FlexNN/build/tools/compiler/tinyforge-compile`**):
+`TinyForge/generated/model_data.h` (tiny model `Dense 4→3 ReLU → Dense 3→2 Softmax`, int8, **emitted by `TinyForge/build/tools/compiler/tinyforge-compile`**):
 
 ```c
 #pragma once
@@ -1297,14 +1290,14 @@ static const tinyforge_layer_desc_t tinyforge_layers[2] = {{0,1,4,3},{0,5,3,2}};
 
 ## Appendix D: Decisions Log (extends §9 of OVERVIEW)
 
-- **Flat binary over FlatBuffers/Protobuf (§5):** 50 LOC parser vs 30 KB dep, linear stack needs no graph flexibility. Chose magic+version+CRC for debuggability. Now shared between `FlexNN/lib/ModelIO.cpp` and `FlexNN/tools/compiler/src/parser.cpp` — no duplication.
-- **Affine per-tensor int8 first (§7):** simplest CMSIS path (`arm_fully_connected_s8` expects per-tensor), 75% size saving, <1% accuracy loss expected; per-channel later for +0.5% accuracy. Quant code lives in `FlexNN/tools/compiler/src/quantize.cpp` so FlexNN can reuse it for calibration.
+- **Flat binary over FlatBuffers/Protobuf (§5):** 50 LOC parser vs 30 KB dep, linear stack needs no graph flexibility. Chose magic+version+CRC for debuggability. Now shared between `FlexNN/lib/ModelIO.cpp` and `TinyForge/tools/compiler/src/parser.cpp` — no duplication.
+- **Affine per-tensor int8 first (§7):** simplest CMSIS path (`arm_fully_connected_s8` expects per-tensor), 75% size saving, <1% accuracy loss expected; per-channel later for +0.5% accuracy. Quant code lives in `TinyForge/tools/compiler/src/quantize.cpp` so FlexNN can reuse it for calibration.
 - **Header codegen (§6.6):** MCU has no FS; `const` in flash, no parser, deterministic. Rejected SD-card blob (extra hardware, runtime parsing cost). Header is now emitted by FlexNN, consumed by TinyForge — clean producer/consumer.
 - **Backend enum compile-time (§10):** `constexpr if` eliminates branch, enables DCE, saves cycles; runtime switch would cost ~2% latency.
-- **LUT for Sigmoid/Tanh int8 (§12):** 256 B table, 5 cycles vs 50 cycles `expf`; accuracy tradeoff documented, fallback to `expf` for float. LUT is emitted by FlexNN's compiler into `model_data.h`.
+- **LUT for Sigmoid/Tanh int8 (§12):** 256 B table, 5 cycles vs 50 cycles `expf`; accuracy tradeoff documented, fallback to `expf` for float. LUT is emitted by TinyForge's compiler into `model_data.h`.
 - **Argmax for Softmax (§12):** softmax monotonic, argmax preserves class, saves `exp` entirely; probabilities not needed on edge, can be computed on host if logged via UART.
 - **Arena double-buffer (§9.2):** minimal RAM for linear stack, no per-layer template bloat, one `Model` class for any model.
-- **Bottom-up gating (§4):** prevents training a non-deployable model; now enforced by `FlexNN::isSupportedForExport()` which directly checks `FlexNN/include/tinyforge/op_registry.hpp` (no cross-repo call).
+- **Bottom-up gating (§4):** prevents training a non-deployable model; now enforced by `FlexNN::isSupportedForExport()` which directly checks `TinyForge/include/tinyforge/op_registry.hpp` (no cross-repo call).
 - **NEW v0.2 — Compiler lives in FlexNN, not TinyForge (§2, §6, §8):** Training, serialization, and compilation share `LayerType`/`Activation` and `op_registry.hpp`. Co-location lets `exportModel()` validate before writing, lets `tools/compiler` reuse `FlexNN` forward for calibration without re-implementing math, makes a single `FlexNN` CI (`ctest`) gate export→compile, and keeps TinyForge minimal (only runtime + `generated/model_data.h`). TinyForge pins FlexNN via `external/FlexNN` and includes the same `op_registry.hpp` for its `Model::init()` second check. Rejected: keeping compiler in TinyForge (would duplicate enums, require relative `../external` includes that break standalone FlexNN builds).
 
 ---

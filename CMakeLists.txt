@@ -52,6 +52,15 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(TinyForge PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
+# ── TinyForge compiler — lives HERE (TinyForge depends on FlexNN)
+# Parses FlexNN's model.bin and emits generated/model_data.h for TinyForge's runtime.
+# Like FlexNN's lib, but for TinyForge: FlexNN is standalone, TinyForge's compiler links
+# FlexNN from external/ for ModelIO format.
+option(TINYFORGE_BUILD_COMPILER "Build tinyforge-compile (needs external/FlexNN)" ON)
+if(TINYFORGE_BUILD_COMPILER)
+  add_subdirectory(tools/compiler)
+endif()
+
 # ── Tests — host unit tests (like FlexNN, optional)
 option(TINYFORGE_BUILD_TESTS "Build host unit tests" OFF)
 if(TINYFORGE_BUILD_TESTS)
@@ -77,5 +86,6 @@ install(EXPORT TinyForgeTargets
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/TinyForge
 )
 
-message(STATUS "TinyForge configured — FlexNN generates model_data.h → TinyForge links it")
-message(STATUS "  Use FlexNN: cmake -S external/FlexNN -B build && ./build/tools/compiler/tinyforge-compile model.bin -o generated")
+message(STATUS "TinyForge configured — TinyForge depends on FlexNN (external/FlexNN), not vice versa")
+message(STATUS "  FlexNN (standalone): cmake -S external/FlexNN -B build && cmake --build build  # trains, exports model.bin")
+message(STATUS "  TinyForge compiler: cmake -S . -B build && ./build/tools/compiler/tinyforge-compile model.bin -o generated")
