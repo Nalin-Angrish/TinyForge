@@ -1,10 +1,12 @@
-# TinyForge — Low-Level Design (LLD) v0.2
+# TinyForge — Low-Level Design (LLD) v0.3
 
 > **Parent spec:** `docs/OVERVIEW.md` (Draft v0.1, now `ref/` local-only). This LLD is the implementation blueprint for the v0.1 spec. It specifies *exact* data structures, file formats, APIs, build integration, and rationale for every decision. Any deviation in code must update this doc.
 >
 > **Revision 2026-09-05 (v0.2):** **Compiler moved from TinyForge to FlexNN.** All compilation-related work — parsing the flat binary, op-registry validation, arena checks, int8 quantization/calibration, BatchNorm folding, and `model_data.h` codegen — now lives in **`FlexNN/tools/compiler`** (built as part of FlexNN's CMake). TinyForge (this repo) contains only the on-device runtime, platform drivers, and `generated/` header consumed from FlexNN. Section 2, 6, 8, 15, 19 and Appendix D are updated; a migration rationale is added below. v0.1 text that assumed `TinyForge/tools/compiler` is retained as struck-through where useful for history but the new topology is authoritative.
 
-**Status:** Draft · **Target:** STM32F407VGT6 (Cortex-M4F, 1 MB Flash, 192 KB RAM: 112 KB SRAM + 64 KB CCM + 16 KB backup), ST-Link V2-A, LIS3DSH/LIS302DL accel, MP45DT02 mic · **Toolchain:** `arm-none-eabi-gcc`, PlatformIO `ststm32 / disco_f407vg / stm32cube`, CMSIS-NN 6.x, CMSIS-DSP, Eigen3 3.4+, OpenMP (host) · **Repos:** `Nalin-Angrish/FlexNN` (public, PC host, now owns compiler) + `Nalin-Angrish/TinyForge` (private, MCU runtime) with submodule `external/FlexNN @ main`
+> **Revision 2026-09-05 (v0.3):** **TinyForge is now a CMake library, not a PlatformIO project.** File layout now mirrors FlexNN (`include/tinyforge/`, `lib/`, `src/main.cpp`, `tests/`, `docs/`). `platformio.ini` and PlatformIO `test/`/`lib/` scaffolding removed. Build is `cmake -S . -B build && cmake --build build` (host) or `cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake` (cross). See §2, §19. All compilation-related work — parsing the flat binary, op-registry validation, arena checks, int8 quantization/calibration, BatchNorm folding, and `model_data.h` codegen — now lives in **`FlexNN/tools/compiler`** (built as part of FlexNN's CMake). TinyForge (this repo) contains only the on-device runtime, platform drivers, and `generated/` header consumed from FlexNN. Section 2, 6, 8, 15, 19 and Appendix D are updated; a migration rationale is added below. v0.1 text that assumed `TinyForge/tools/compiler` is retained as struck-through where useful for history but the new topology is authoritative.
+
+**Status:** Draft · **Target:** STM32F407VGT6 (Cortex-M4F, 1 MB Flash, 192 KB RAM: 112 KB SRAM + 64 KB CCM + 16 KB backup), ST-Link V2-A, LIS3DSH/LIS302DL accel, MP45DT02 mic · **Toolchain:** `arm-none-eabi-gcc` via `cmake/toolchains/arm-cortex-m4f.cmake`, CMake 3.10+, CMSIS-NN 6.x, CMSIS-DSP, Eigen3 3.4+, OpenMP (host) · **Repos:** `Nalin-Angrish/FlexNN` (public, PC host, owns compiler) + `Nalin-Angrish/TinyForge` (private, MCU runtime) with submodule `external/FlexNN @ main`
 
 ---
 
@@ -78,21 +80,22 @@ FlexNN/  (github.com/Nalin-Angrish/FlexNN, public, PC host) — NOW OWNS COMPILE
 ├── CMakeLists.txt                            # add_library(FlexNN ...) + add_subdirectory(tools/compiler)
 └── ... (Doxyfile, data, etc.)
 
-TinyForge/  (github.com/Nalin-Angrish/TinyForge, private, MCU runtime) — THIS REPO
-├── .gitmodules                               # external/FlexNN @ main (https)
-├── external/
-│   └── FlexNN/                               # submodule, provides:
-│       ├── include/tinyforge/op_registry.hpp # <-- runtime #includes this header
-│       └── tools/compiler/tinyforge-compile  # <-- built binary, invoked to emit header
-├── runtime/ OR include/+src/                 # on-device runtime (PlatformIO)
-│   ├── include/tinyforge/{runtime.hpp, backend.hpp, kernels/*.hpp, quant.hpp}
-│   └── src/{runtime.cpp, backend_scalar.cpp, backend_cmsis.cpp, platform/*.cpp}
-├── generated/                                # .gitignore, OUTPUT of FlexNN's compiler
-│   └── model_data.h                          # copied from FlexNN/tools/compiler output
-├── include/ lib/ src/ test/                  # PlatformIO legacy dirs → runtime/ will supersede
-├── platformio.ini                            # [env:disco_f407vg] + [env:disco_f407vg_cmsis] etc.
-├── CMakeLists.txt                            # super-build: add_subdirectory(external/FlexNN) for HOST TESTS ONLY
-└── ref/{OVERVIEW.md, LLD.md (this)}          # local-only, gitignored via ref/
+TinyForge/  (github.com/Nalin-Angrish/TinyForge, private, CMake library) — THIS REPO
+├── CMakeLists.txt                            # like FlexNN/CMakeLists.txt — add_library(TinyForge)
+├── include/tinyforge/                        # public headers (like FlexNN/include/)
+│   ├── tinyforge.h                           # aggregator
+│   ├── types.hpp / runtime.hpp / backend.hpp / quant.hpp
+│   └── kernels/{dense,conv1d,activations}.hpp
+├── lib/                                      # library sources (like FlexNN/lib/)
+│   ├── runtime.cpp / backend_scalar.cpp / quant.cpp / activations.cpp
+│   └── backend_cmsis.cpp                     # only with -DTINYFORGE_USE_CMSIS_NN=ON
+├── src/main.cpp                              # example firmware (like FlexNN/src/main.cpp)
+├── tests/test_runtime.cpp                    # host tests
+├── docs/{OVERVIEW.md, LLD.md (this)}         # committed spec (ref/ is local ignored copy)
+├── generated/                                # OUTPUT of FlexNN's compiler (gitignored)
+│   └── model_data.h                          # from FlexNN/tools/compiler/tinyforge-compile
+├── cmake/toolchains/arm-cortex-m4f.cmake     # cross toolchain (like -mcpu=cortex-m4)
+└── external/FlexNN/                          # submodule @ main — provides tinyforge-compile + op_registry.hpp
 ```
 
 **Old v0.1 topology (for history):**
@@ -109,11 +112,11 @@ FlexNN/                    ← only libFlexNN, no compiler
 - **Single definition of `LayerType`/`Activation`:** FlexNN's `Layer.h` defines `enum class Activation` and `enum class LayerType` (see §4.1-4.2). The compiler's parser and validator must switch on those exact enums. If the compiler lived in TinyForge, it would either `#include "../external/FlexNN/include/Layer.h"` (a fragile relative path that breaks when FlexNN is built standalone) or duplicate the enums (drift). In `FlexNN/tools/compiler` the compiler just `#include "LayerTypes.hpp"` and `#include "tinyforge/op_registry.hpp"` with a normal include path.
 - **Export-time validation:** `FlexNN::exportModel()` can now call `tinyforge::isSupported(type, act, quant)` *before* writing `model.bin` and return `Status{false, "layer 2 Conv1D+Tanh not yet in TinyForge runtime"}`. In v0.1 the export would succeed and the later `TinyForge/tools/compiler --check-only` would fail — a worse UX (write then fail).
 - **One CMake, one CI:** `FlexNN/CMakeLists.txt` does `add_library(FlexNN ...)` and `add_subdirectory(tools/compiler)` which does `target_link_libraries(tinyforge-compile PRIVATE FlexNN Eigen3::Eigen)`. FlexNN's own CI can now `ctest` both the training tests and the compiler's parser/quant tests in one build, and `tinyforge-compile --check-only` can be a `add_test()` that runs on every example `model.bin`.
-- **TinyForge stays minimal:** TinyForge's `CMakeLists.txt:1` no longer needs to build the compiler; it only `add_subdirectory(external/FlexNN)` when host tests need Eigen, and PlatformIO never touches `external/` (`build_src_filter = -<external> -<tools>`). The only artifact TinyForge consumes from FlexNN is `generated/model_data.h`, which is produced by invoking the pre-built `external/FlexNN/build/tools/compiler/tinyforge-compile`.
+- **TinyForge stays minimal and is now a plain CMake library (no PlatformIO):** `TinyForge` builds as `add_library(TinyForge)` from `lib/` with headers in `include/tinyforge/` — exactly like `FlexNN` (`add_library(FlexNN)` from `lib/`). The `external/FlexNN` submodule is *not* built as part of TinyForge's library; it is only used to produce `generated/model_data.h` via its `tinyforge-compile` binary. To keep host builds native, TinyForge does not hardcode MCU flags; a toolchain file (`cmake/toolchains/arm-cortex-m4f.cmake`) supplies `-mcpu=cortex-m4 -mfpu=...` for cross builds.
 - **Submodule pinning gives reproducibility:** TinyForge pins a FlexNN SHA. That SHA pins both a `libFlexNN` version and a compiler version and a registry version. When TinyForge bumps the submodule, it automatically bumps the runtime's `op_registry.hpp` (because `runtime/include/tinyforge/runtime.hpp` does `#include "external/FlexNN/include/tinyforge/op_registry.hpp"`). No manual copy.
 - *Rejected:* keep compiler in TinyForge but make it `#include "external/FlexNN/..."` — works for TinyForge builds but breaks `FlexNN` standalone builds (no TinyForge checkout), and FlexNN's own `exportModel` cannot validate without the compiler.
 
-### 2.2 Build systems, clearly separated
+### 2.2 Build systems, clearly separated and now both CMake
 
 - **FlexNN host build (CMake, PC):**
   ```bash
@@ -126,60 +129,50 @@ FlexNN/                    ← only libFlexNN, no compiler
   #   build/main (example)
   ctest --test-dir build
   ```
-  Flags: `-O3 -march=native -fopenmp -std=c++17` (host). No MCU flags. Tests: `tests/` (FlexNN) + `tools/compiler/tests/` (parser/quant/codegen).
+  Flags: `-O3 -march=native -fopenmp -std=c++17` (host). No MCU flags. Tests: `tests/` (FlexNN) + `tools/compiler/tests/`.
 
-- **TinyForge MCU build (PlatformIO, cross):**
+- **TinyForge host build (CMake, scalar, like FlexNN):**
   ```bash
-  # Inside TinyForge repo
-  # First, ensure FlexNN is built (or use prebuilt tinyforge-compile):
-  cmake -S external/FlexNN -B external/FlexNN/build && cmake --build external/FlexNN/build --target tinyforge-compile
-  # Then compile the model (FlexNN's compiler emits header into TinyForge):
-  external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o generated
-  # Then build firmware:
-  pio run -e disco_f407vg_cmsis
-  pio run -e disco_f407vg_cmsis -t upload
+  # Inside TinyForge repo — no FlexNN needed to build the library itself
+  cmake -S . -B build
+  cmake --build build -j
+  # produces:
+  #   build/libTinyForge.a
+  #   build/main  # from src/main.cpp
+  ctest --test-dir build  # runs tests/test_runtime.cpp
   ```
-  Flags: `-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -Os -ffunction-sections -fdata-sections -Wl,--gc-sections -fno-exceptions -fno-rtti -Wall -Wextra -Werror` (MCU). `build_src_filter` excludes `external/` and `generated/` is *included* as a header.
 
-**TinyForge's `CMakeLists.txt` after the move (simplified):**
+- **TinyForge cross build (CMake + toolchain, like FlexNN but for MCU):**
+  ```bash
+  # First, ensure FlexNN's compiler is built (it generates the model header):
+  cmake -S external/FlexNN -B external/FlexNN/build && cmake --build external/FlexNN/build -j
+  external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --backend cmsis --calib data/calib.csv --arena 98304 -o generated
+  # → writes generated/model_data.h
+
+  # Then cross-compile TinyForge as a library for STM32F407:
+  cmake -S . -B build-mcu -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake
+  cmake --build build-mcu -j
+  # or with CMSIS-NN:
+  cmake -S . -B build-mcu -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake -DTINYFORGE_USE_CMSIS_NN=ON
+  cmake --build build-mcu -j
+  ```
+  Toolchain `cmake/toolchains/arm-cortex-m4f.cmake` supplies `-mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -ffunction-sections -fdata-sections -fno-exceptions -fno-rtti -Wl,--gc-sections`. No `platformio.ini`; no `build_src_filter` needed — `external/` is never part of TinyForge's library sources.
+
+**TinyForge's `CMakeLists.txt` (now, mirrors FlexNN — `add_library` + `add_executable`):**
 
 ```cmake
 cmake_minimum_required(VERSION 3.10)
 project(TinyForge)
-
-# Only for host tests that need FlexNN; not for compiler (compiler is in FlexNN)
-option(TINYFORGE_USE_FLEXNN "Build with FlexNN submodule for host tests" ON)
-if(TINYFORGE_USE_FLEXNN AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/FlexNN/CMakeLists.txt)
-    add_subdirectory(external/FlexNN) # provides FlexNN target, but NOT tinyforge-compile (that's already built)
-endif()
-
-# No add_subdirectory(tools/compiler) — compiler lives in FlexNN
-message(STATUS "TinyForge: use external/FlexNN/build/tools/compiler/tinyforge-compile to generate model_data.h")
+set(CMAKE_CXX_STANDARD 17)
+include_directories(include)
+set(LIB_SOURCES lib/runtime.cpp lib/backend_scalar.cpp lib/quant.cpp lib/activations.cpp)
+add_library(TinyForge ${LIB_SOURCES})
+add_executable(main src/main.cpp)
+target_link_libraries(main PRIVATE TinyForge::TinyForge)
+# Tests: add_subdirectory(tests) when -DTINYFORGE_BUILD_TESTS=ON
 ```
 
-**PlatformIO `platformio.ini` evolution (TinyForge, unchanged except src_filter):**
-
-```ini
-[env]
-framework = stm32cube
-build_flags = -DTINYFORGE_BACKEND_SCALAR=1
-             -Wall -Wextra -Werror -Wno-unknown-pragmas
-             -ffunction-sections -fdata-sections
-build_unflags = -std=gnu++11
-build_src_filter = +<*> -<../external> -<../generated> +<../generated/model_data.h>
-                   # Note: external/FlexNN is NEVER compiled for MCU
-
-[env:disco_f407vg_scalar]
-board = disco_f407vg
-build_flags = ${env.build_flags} -DTINYFORGE_BACKEND=0 -DTINYFORGE_BACKEND_SCALAR
-
-[env:disco_f407vg_cmsis]
-board = disco_f407vg
-build_flags = ${env.build_flags} -DTINYFORGE_BACKEND=1 -DTINYFORGE_BACKEND_CMSIS
-lib_deps = CMSIS-NN@1.3.0, CMSIS-DSP@1.15.0
-```
-
-*Why two envs, not one with runtime switch:* compile-time backend selection eliminates runtime `if (backend==...)` in the hot loop (saves ~1-2 cycles per MAC and enables dead-code elimination). Each firmware image is single-backend, single-model.
+*Why compile-time backend, not runtime switch:* same as before — two library variants (`scalar` vs `cmsis-nn`) are built by choosing the toolchain/CMake option, not by an `if` in the hot loop. Each firmware chooses one backend at CMake configure time.
 
 ---
 
@@ -502,7 +495,7 @@ Per-layer extended (v0.1):
 
 - Train. Training stays in `FlexNN.h`/`Layer.h`.
 - Do graph optimization beyond BN folding and dead-code elimination of unused layers (none in linear stack).
-- Link or flash. It just emits a header; TinyForge's PlatformIO compiles it.
+- Link or flash. It just emits a header; TinyForge's CMake (via `cmake --build build-mcu` with the toolchain) compiles it into firmware.
 - Live in TinyForge. *Why v0.2:* see §2.1. Keeping it in FlexNN lets `exportModel()` and `tinyforge-compile` share `LayerTypes.hpp` and `op_registry.hpp`, makes `isSupportedForExport()` a one-liner, and lets FlexNN's `ctest` gate export→compile in one CI job.
 
 **Why co-located, not separate (inverted from v0.1):**
@@ -1046,8 +1039,9 @@ cmake -S . -B build && cmake --build build -j
 # --- In TinyForge repo (this repo, MCU) ---
 
 # 3) Build firmware (MCU, consumes generated header from FlexNN)
-pio run -e disco_f407vg_cmsis
-pio run -e disco_f407vg_cmsis -t upload
+cmake -S . -B build-mcu -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake
+cmake --build build-mcu -j
+# flash via OpenOCD / ST-Link: openocd -f board/stm32f4discovery.cfg -c "program build-mcu/main.elf verify reset exit"
 
 # 4) Validate on-device (UART)
 # firmware prints: "init ok, arena 400B, latency 12450 cycles, output [0.1, 0.8, ...]"
@@ -1122,7 +1116,7 @@ Per §8 of spec, three firmware variants **per application**, separately flashed
 - **TinyForge host tests (in `TinyForge/CMakeLists.txt` when `TINYFORGE_USE_FLEXNN`):**
   - May link `external/FlexNN` for golden float reference, but not required; TinyForge's host tests can just include `generated/model_data.h` and run scalar vs cmsis stubs.
 
-### MCU — Unity / PlatformIO `test/` (TinyForge)
+### MCU — `tests/` on host (TinyForge, scalar reference)
 
 - `test_runtime_dense`: scalar vs cmsis vs float reference on same input (input.bin from FlexNN's `exportImport` via UART or embedded array).
 - `test_runtime_conv`: same.
@@ -1135,7 +1129,7 @@ Per §8 of spec, three firmware variants **per application**, separately flashed
 ### CI (GitHub Actions, planned)
 
 - **`FlexNN` CI:** `cmake -S . -B build && ctest` — builds `libFlexNN` + `tinyforge-compile` and runs all host tests including `--check-only` on example models. This is where export→compile is gated.
-- **`TinyForge` CI:** `pio run -e disco_f407vg_scalar -e disco_f407vg_cmsis` (compile-only, no hardware) — verifies that the pinned `external/FlexNN` SHA's `op_registry.hpp` + `generated/model_data.h` (regenerated via FlexNN's compiler) still compiles for MCU. Also `registry-gate`: run `external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --check-only` to ensure TinyForge's `model.bin` is still valid.
+- **`TinyForge` CI:** `cmake -S . -B build && cmake --build build` (host scalar) and `cmake -S . -B build-mcu -DCMAKE_TOOLCHAIN_FILE=cmake/toolchains/arm-cortex-m4f.cmake && cmake --build build-mcu` (cross, no hardware) — verifies that the pinned `external/FlexNN` SHA's `op_registry.hpp` + `generated/model_data.h` (regenerated via FlexNN's compiler) still compiles for MCU. Also `registry-gate`: run `external/FlexNN/build/tools/compiler/tinyforge-compile model.bin --check-only`.
 
 ---
 
@@ -1173,8 +1167,8 @@ TinyForge/  (private, runtime only)
 │   └── platform/{clock.cpp, uart.cpp, accel_driver.cpp, mic_driver.cpp, dsp_mfcc.cpp}
 ├── generated/                       # .gitignore, OUTPUT of FlexNN's compiler
 │   └── model_data.h                 # generated by external/FlexNN/build/tools/compiler/tinyforge-compile
-├── include/ lib/ src/ test/         # PlatformIO legacy dirs → runtime/ will supersede; keep for PIO compat
-├── platformio.ini                   # expanded envs (no compiler)
+├── docs/{OVERVIEW.md,LLD.md}          # committed spec (ref/ is local ignored copy)
+├── cmake/toolchains/arm-cortex-m4f.cmake  # cross toolchain (replaces platformio.ini)
 ├── CMakeLists.txt                   # super-build for TinyForge host tests (add_subdirectory(external/FlexNN) optional)
 └── ref/{OVERVIEW.md, LLD.md}        # local-only, gitignored
 ```
