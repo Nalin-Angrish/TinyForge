@@ -1,0 +1,4 @@
+[submodule "external/FlexNN"]
+	path = external/FlexNN
+	url = https://github.com/Nalin-Angrish/FlexNN.git
+	branch = main
