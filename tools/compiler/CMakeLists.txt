@@ -9,19 +9,24 @@ project(tinyforge-compile)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# FlexNN is needed only for ModelIO format / Eigen types to parse model.bin
-# We vendor it as external/FlexNN (TinyForge submodule)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/../../external/FlexNN/CMakeLists.txt)
-  # We only need FlexNN's headers for ModelIO, not its main target
-  # For now, just add its include path
-  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../external/FlexNN/include)
-  include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
-else()
-  message(WARNING "external/FlexNN not found — compiler will need it to parse model.bin")
-endif()
+# FlexNN is fetched by parent TinyForge via FetchContent (or find_package)
+# It provides ModelIO format and Eigen types for parsing model.bin.
+# No vendored external/ needed.
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/../../include)
+# FlexNN headers from FetchContent (parent) — via interface target or source dir
+if(TARGET FlexNN_headers)
+  # Header-only, no Eigen needed to build TinyForge's compiler stub
+  get_target_property(_inc FlexNN_headers INTERFACE_INCLUDE_DIRECTORIES)
+  include_directories(${_inc})
+elseif(TARGET FlexNN)
+  # Full FlexNN was fetched (old path)
+elseif(DEFINED flexnn_src_SOURCE_DIR)
+  include_directories(${flexnn_src_SOURCE_DIR}/include)
+elseif(DEFINED FlexNN_SOURCE_DIR)
+  include_directories(${FlexNN_SOURCE_DIR}/include)
+endif()
 
 set(COMPILER_SOURCES
   src/main.cpp

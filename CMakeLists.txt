@@ -52,12 +52,35 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(TinyForge PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
-# ── TinyForge compiler — lives HERE (TinyForge depends on FlexNN)
-# Parses FlexNN's model.bin and emits generated/model_data.h for TinyForge's runtime.
-# Like FlexNN's lib, but for TinyForge: FlexNN is standalone, TinyForge's compiler links
-# FlexNN from external/ for ModelIO format.
-option(TINYFORGE_BUILD_COMPILER "Build tinyforge-compile (needs external/FlexNN)" ON)
+# ── TinyForge compiler — lives HERE (TinyForge depends on FlexNN, fetched via CMake)
+# Parses FlexNN's model.bin (ModelIO format) and emits generated/model_data.h.
+# FlexNN is NOT a submodule — it is fetched from git when the compiler is built.
+# We only need FlexNN's *headers* (ModelIO format), not its full CMake+Eig en build.
+option(TINYFORGE_BUILD_COMPILER "Build tinyforge-compile" ON)
+option(TINYFORGE_FETCH_FLEXNN "Fetch FlexNN headers from git for compiler" ON)
 if(TINYFORGE_BUILD_COMPILER)
+  if(TINYFORGE_FETCH_FLEXNN)
+    include(FetchContent)
+    FetchContent_Declare(
+      FlexNN_src
+      GIT_REPOSITORY https://github.com/Nalin-Angrish/FlexNN.git
+      GIT_TAG 78b83a5cfb478f3def3f70304ea7dc35d3c0f814 # pinned SHA, like submodule did
+      GIT_SHALLOW TRUE
+    )
+    FetchContent_GetProperties(FlexNN_src)
+    if(NOT flexnn_src_POPULATED)
+      FetchContent_Populate(FlexNN_src)
+      message(STATUS "TinyForge: fetched FlexNN headers at ${flexnn_src_SOURCE_DIR} for compiler")
+    endif()
+    # Expose as interface so compiler can find FlexNN headers without needing Eigen
+    add_library(FlexNN_headers INTERFACE)
+    target_include_directories(FlexNN_headers INTERFACE ${flexnn_src_SOURCE_DIR}/include)
+    # Also make FlexNN_SOURCE_DIR available for compiler's CMake
+    set(FlexNN_SOURCE_DIR ${flexnn_src_SOURCE_DIR} CACHE INTERNAL "")
+  else()
+    find_package(FlexNN REQUIRED)
+    message(STATUS "TinyForge: using system FlexNN for compiler")
+  endif()
   add_subdirectory(tools/compiler)
 endif()
 
@@ -86,6 +109,6 @@ install(EXPORT TinyForgeTargets
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/TinyForge
 )
 
-message(STATUS "TinyForge configured — TinyForge depends on FlexNN (external/FlexNN), not vice versa")
-message(STATUS "  FlexNN (standalone): cmake -S external/FlexNN -B build && cmake --build build  # trains, exports model.bin")
+message(STATUS "TinyForge configured — TinyForge depends on FlexNN (fetched via FetchContent), not vice versa")
+message(STATUS "  FlexNN (standalone): git clone https://github.com/Nalin-Angrish/FlexNN && cmake -S FlexNN -B build && cmake --build build  # trains, exports model.bin")
 message(STATUS "  TinyForge compiler: cmake -S . -B build && ./build/tools/compiler/tinyforge-compile model.bin -o generated")

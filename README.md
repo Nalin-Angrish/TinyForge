@@ -26,35 +26,35 @@ int main() {
 ```
 
 **Note:**
-- `generated/model_data.h` is produced by **TinyForge's** `tinyforge-compile` (in `tools/compiler`, which links FlexNN from `external/` for parsing), not by FlexNN. FlexNN only writes `model.bin`.
+- `generated/model_data.h` is produced by **TinyForge's** `tinyforge-compile` (in `tools/compiler`, which fetches FlexNN via `FetchContent` for `ModelIO` format), not by FlexNN. FlexNN only writes `model.bin`.
 - Dimensions and quant params come from the header; no filesystem on-device.
 
 ## Requirements
 
-- `cmake >=3.10` and a C++17 compiler (`g++`/`clang++` for host, `arm-none-eabi-g++` for MCU)
-- For model generation: FlexNN (`external/FlexNN`) needs `libeigen3-dev` and `OpenMP` (see `external/FlexNN/README.md`)
-- Optional for MCU: `CMSIS-NN`/`CMSIS-DSP` for the accelerated backend
+- `cmake >=3.10` (3.14 for `FetchContent_MakeAvailable`) and C++17 compiler (`g++`/`clang++` host, `arm-none-eabi-g++` MCU)
+- For model generation: FlexNN needs `libeigen3-dev` and `OpenMP`; TinyForge fetches it via `FetchContent` when `TINYFORGE_BUILD_COMPILER=ON` (no manual clone)
+- Optional for MCU: `CMSIS-NN`/`CMSIS-DSP`
 
 ## Repository Layout
 
 This mirrors FlexNN's layout (`include/` → `lib/` → `src/`):
 
 ```
-TinyForge/
-├── CMakeLists.txt              # like FlexNN/CMakeLists.txt
+TinyForge/  (CMake library, like FlexNN)
+├── CMakeLists.txt              # add_library(TinyForge) + FetchContent for FlexNN
 ├── include/tinyforge/          # public headers (like FlexNN/include/)
 │   ├── tinyforge.h             # → FlexNN.h
-│   ├── types.hpp / runtime.hpp / backend.hpp
+│   ├── types.hpp / runtime.hpp / backend.hpp / op_registry.hpp
 │   └── kernels/
 ├── lib/                        # library sources (like FlexNN/lib/)
 │   ├── runtime.cpp / backend_scalar.cpp / quant.cpp / activations.cpp
 │   └── backend_cmsis.cpp       # only with -DTINYFORGE_USE_CMSIS_NN=ON
 ├── src/main.cpp                # example firmware (like FlexNN/src/main.cpp)
 ├── tests/test_runtime.cpp      # host tests
-├── docs/{OVERVIEW.md,LLD.md}   # spec + low-level design
-├── generated/                  # model_data.h from TinyForge/tools/compiler (gitignored)
-├── tools/compiler/             # tinyforge-compile — parses FlexNN model.bin, emits header
-└── external/FlexNN/            # submodule — FlexNN standalone, provides ModelIO format
+├── tools/compiler/             # tinyforge-compile — parses FlexNN model.bin (via FetchContent)
+├── docs/{OVERVIEW.md, LLD_FLEXNN.md, LLD_TINYFORGE.md}
+├── generated/                  # model_data.h from tools/compiler (gitignored)
+└── cmake/toolchains/           # cross toolchain (replaces platformio.ini)
 ```
 
 ## Building and Running
@@ -88,10 +88,10 @@ cmake --build build-mcu -j
 
 ```bash
 # Train and export with FlexNN (standalone, no TinyForge needed)
-cmake -S external/FlexNN -B external/FlexNN/build && cmake --build external/FlexNN/build -j
-./external/FlexNN/build/main  # trains and calls exportModel("model.bin")
+git clone https://github.com/Nalin-Angrish/FlexNN && cmake -S FlexNN -B FlexNN/build && cmake --build FlexNN/build -j
+./FlexNN/build/main  # → model.bin (via FlexNN::exportModel)
 
-# Compile with TinyForge (validates, quantizes, emits header for TinyForge runtime)
+# Compile with TinyForge (fetches FlexNN for ModelIO format via FetchContent)
 cmake -S . -B build && cmake --build build -j
 ./build/tools/compiler/tinyforge-compile model.bin -o generated --backend cmsis
 # → generated/model_data.h
@@ -121,7 +121,7 @@ target_link_libraries(your_firmware PRIVATE TinyForge::TinyForge)
 - `include/tinyforge/types.hpp` — `enum class Activation/LayerType/Status`, `struct QuantParams`
 - `include/tinyforge/backend.hpp` — `TINYFORGE_BACKEND` compile-time switch
 
-See `docs/LLD.md` for the full low-level design.
+See `docs/LLD_FLEXNN.md` (FlexNN training & export) and `docs/LLD_TINYFORGE.md` (TinyForge compilation & kernels) for the full low-level designs.
 
 ## License
 
