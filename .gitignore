@@ -1,43 +1,23 @@
-.pio/
-.pioenvs/
-.piolibdeps/
-.vscode/.browse.c_cpp.db*
-.vscode/c_cpp_properties.json
-.vscode/launch.json
-.vscode/ipch/
-.vscode/.ropeproject/
-
-# Build artifacts
 build/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
-Makefile
-*.o
-*.a
-*.so
-*.out
 
-# Compiled firmware
-.pio/build/
-.pio/libdeps/
+# Generated model header from FlexNN's compiler — not committed
+# Keep generated/README.md, ignore the actual header
+generated/model_data.h
+generated/model_data.cpp
+generated/*.o
 
-# OS
+# Reference docs kept locally (see docs/ for committed version)
+ref/
+
+# IDE / OS
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
 *~
-
-# IDE
-.idea/
 *.swp
 *.swo
-
-# Generated model header from FlexNN's compiler (do not commit)
-generated/model_data.h
-generated/model_data.cpp
-generated/*.h
-generated/*.cpp
-
-# Reference docs (local only, never committed)
-ref/

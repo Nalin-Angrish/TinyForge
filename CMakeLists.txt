@@ -1,107 +1,69 @@
 cmake_minimum_required(VERSION 3.10)
-project(TinyForge VERSION 0.2.0 LANGUAGES C CXX)
+project(TinyForge)
 
-# ──────────────────────────────────────────────────────────────
-# TinyForge — embeddable inference library for Cortex-M4F
-# Mirrors FlexNN's structure:
-#   include/tinyforge/  → public headers
-#   lib/               → library sources (like FlexNN/lib/)
-#   examples/          → example firmware mains (like FlexNN/src/main.cpp)
-#   tests/             → host unit tests
-# This CMake builds the library for either host (scalar, for tests)
-# or cross-compiled MCU (scalar or CMSIS-NN via toolchain file).
-# FlexNN is *not* required to build the runtime itself — it is only
-# needed to generate generated/model_data.h via its tinyforge-compile CLI.
-# ──────────────────────────────────────────────────────────────
-
+# Set the C++ standard — mirrors FlexNN
 set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Options — similar style to FlexNN
-option(TINYFORGE_BACKEND_SCALAR "Build scalar backend (portable, host-capable)" ON)
-option(TINYFORGE_BACKEND_CMSIS_NN "Build CMSIS-NN backend (requires CMSIS)" OFF)
-option(TINYFORGE_BUILD_TESTS "Build host unit tests" OFF)
-option(TINYFORGE_BUILD_EXAMPLES "Build example firmware binaries" OFF)
-option(TINYFORGE_USE_FLEXNN "Use vendored FlexNN for host tests/tools (optional)" OFF)
+# Include directories — like FlexNN's include_directories(include)
+include_directories(include)
+# For generated model header (from FlexNN's tinyforge-compile)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
-# Default to scalar if neither chosen
-if(NOT TINYFORGE_BACKEND_SCALAR AND NOT TINYFORGE_BACKEND_CMSIS_NN)
-  set(TINYFORGE_BACKEND_SCALAR ON)
-endif()
-
-# ── Library sources — mirrors FlexNN/lib/ ──
-set(TINYFORGE_LIB_SOURCES
-  lib/runtime.cpp
-  lib/backend_scalar.cpp
-  lib/quant.cpp
-  lib/activations.cpp
+# ── TinyForge library — mirrors FlexNN/lib/ ──
+# Public headers: include/tinyforge/
+# Sources: lib/
+set(LIB_SOURCES
+    lib/runtime.cpp
+    lib/backend_scalar.cpp
+    lib/quant.cpp
+    lib/activations.cpp
 )
 
-if(TINYFORGE_BACKEND_CMSIS_NN)
-  list(APPEND TINYFORGE_LIB_SOURCES lib/backend_cmsis.cpp)
+# CMSIS-NN backend is optional — enable with -DTINYFORGE_USE_CMSIS_NN=ON
+# and a toolchain that provides arm_nnfunctions.h. For host builds the
+# scalar backend is used (default, portable).
+option(TINYFORGE_USE_CMSIS_NN "Build with CMSIS-NN backend" OFF)
+if(TINYFORGE_USE_CMSIS_NN)
+  list(APPEND LIB_SOURCES lib/backend_cmsis.cpp)
+  add_definitions(-DTINYFORGE_BACKEND=1 -DTINYFORGE_BACKEND_CMSIS=1)
+  message(STATUS "TinyForge: CMSIS-NN backend enabled")
+else()
+  add_definitions(-DTINYFORGE_BACKEND=0 -DTINYFORGE_BACKEND_SCALAR=1)
+  message(STATUS "TinyForge: scalar backend enabled")
 endif()
 
-add_library(TinyForge STATIC ${TINYFORGE_LIB_SOURCES})
+add_library(TinyForge ${LIB_SOURCES})
 add_library(TinyForge::TinyForge ALIAS TinyForge)
 
-target_include_directories(TinyForge
-  PUBLIC
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:include>
-  PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+target_include_directories(TinyForge PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
 
-# ── Compiler flags — no heap, no exceptions, no RTTI for MCU-like builds
-# Host builds keep sanitizers optional; MCU builds are optimized via toolchain
-target_compile_options(TinyForge PRIVATE
-  $<$<COMPILE_LANGUAGE:CXX>:-Wall -Wextra -Wpedantic -Werror>
-  $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Wpedantic -Werror>
-)
+# ── Example firmware — mirrors FlexNN/src/main.cpp ──
+# src/main.cpp is a minimal example that links against the library
+# and a generated model (generated/model_data.h from FlexNN).
+add_executable(main src/main.cpp)
+target_link_libraries(main PRIVATE TinyForge)
 
-# For MCU builds, the user supplies a toolchain file (e.g., cmake/toolchains/arm-cortex-m4f.cmake)
-# that sets -mcpu=cortex-m4 -mfpu=fpv4-sp-d16 -mfloat-abi=hard etc.
-# We do NOT hardcode those here so host builds remain native.
-
-# ── Backend defines — compile-time selection, no runtime branch
-if(TINYFORGE_BACKEND_CMSIS_NN)
-  target_compile_definitions(TinyForge PUBLIC TINYFORGE_BACKEND=1 TINYFORGE_BACKEND_CMSIS=1)
-  # Find CMSIS-NN/DSP if available (optional, not required for scalar host tests)
-  # find_package(CMSISNN QUIET)  # vendored via lib/ or external/ if needed
-  message(STATUS "TinyForge: CMSIS-NN backend enabled — ensure CMSIS packs are available for MCU builds")
-else()
-  target_compile_definitions(TinyForge PUBLIC TINYFORGE_BACKEND=0 TINYFORGE_BACKEND_SCALAR=1)
-  message(STATUS "TinyForge: scalar backend enabled (portable)")
+# ── Compiler flags — no heap/exceptions for MCU builds via toolchain
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(TinyForge PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
 
-# ── Hide FlexNN from runtime — only for host tools
-# FlexNN is only needed to generate generated/model_data.h, not to link TinyForge itself.
-if(TINYFORGE_USE_FLEXNN)
-  if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/external/FlexNN/CMakeLists.txt)
-    message(STATUS "TinyForge: vendored FlexNN found at external/FlexNN — available for tests/tools")
-    # Do NOT add_subdirectory unconditionally; FlexNN is a PC library with Eigen/OpenMP.
-    # Host tests that need it can do it themselves. We just expose the path.
-    set(TINYFORGE_FLEXNN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/FlexNN)
-  else()
-    message(WARNING "TINYFORGE_USE_FLEXNN=ON but external/FlexNN not found. Run: git submodule update --init --recursive")
-  endif()
-endif()
-
-# ── Examples — like FlexNN/src/main.cpp ──
-if(TINYFORGE_BUILD_EXAMPLES)
-  add_subdirectory(examples)
-endif()
-
-# ── Tests — like FlexNN/tests/ ──
+# ── Tests — host unit tests (like FlexNN, optional)
+option(TINYFORGE_BUILD_TESTS "Build host unit tests" OFF)
 if(TINYFORGE_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
 
-# ── Install rules — makes TinyForge importable via add_subdirectory or find_package
+# ── Install — makes TinyForge importable as a package
+#   add_subdirectory(TinyForge) + target_link_libraries(fw PRIVATE TinyForge::TinyForge)
+#   or find_package(TinyForge)
 include(GNUInstallDirs)
-install(TARGETS TinyForge
+install(TARGETS TinyForge main
   EXPORT TinyForgeTargets
   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -115,12 +77,5 @@ install(EXPORT TinyForgeTargets
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/TinyForge
 )
 
-# ── Summary
-message(STATUS "TinyForge ${PROJECT_VERSION} configured")
-message(STATUS "  Backend scalar: ${TINYFORGE_BACKEND_SCALAR}")
-message(STATUS "  Backend CMSIS-NN: ${TINYFORGE_BACKEND_CMSIS_NN}")
-message(STATUS "  Build tests: ${TINYFORGE_BUILD_TESTS}")
-message(STATUS "  Build examples: ${TINYFORGE_BUILD_EXAMPLES}")
-message(STATUS "  Use FlexNN: ${TINYFORGE_USE_FLEXNN} (only for model generation)")
-message(STATUS "  Usage: FlexNN builds tinyforge-compile → generates TinyForge/generated/model_data.h →")
-message(STATUS "         TinyForge builds libTinyForge for your firmware: target_link_libraries(firmware PRIVATE TinyForge::TinyForge)")
+message(STATUS "TinyForge configured — FlexNN generates model_data.h → TinyForge links it")
+message(STATUS "  Use FlexNN: cmake -S external/FlexNN -B build && ./build/tools/compiler/tinyforge-compile model.bin -o generated")
