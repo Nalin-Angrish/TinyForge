@@ -33,5 +33,11 @@ Thumbs.db
 *.swp
 *.swo
 
+# Generated model header from FlexNN's compiler (do not commit)
+generated/model_data.h
+generated/model_data.cpp
+generated/*.h
+generated/*.cpp
+
 # Reference docs (local only, never committed)
 ref/
